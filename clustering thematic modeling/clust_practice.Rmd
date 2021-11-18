@@ -1,0 +1,939 @@
+---
+title: "Кластеризация игроков из FIFA 22"
+output:
+    html_document:
+        #folding of code
+        code_folding: hide
+        #highliting of the code
+        highlight: tango
+        #theme of the document (see bootswatch.com)
+        #other nice variants:
+        ##“default”, “cerulean”, “journal”, “flatly”, “darkly”,
+        ##“readable”, “spacelab”, “united”, “cosmo”, “lumen”,
+        ##“paper”, “sandstone”, “simplex”, “yeti”
+        theme: readable
+        #table of contents
+        toc: yes
+        #floating table of contents
+        toc_float:
+          #collapsed subsections
+          collapsed: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Введение
+
+Хотим провести кластеризацию футбольных игроков
+
+### Описание и чистка
+
+```{r}
+players_full <- read.csv("players_22.csv")
+dim(players_full)
+```
+
+Вот так, например, выглядит строчка для Лионеля Месси:
+
+```{r}
+library(knitr)
+library(kableExtra)
+library(magick)
+cbind(1:107,t(players_full[c(1,3),])) %>% kbl() %>% kable_paper("hover", full_width = F, position = "left")
+```
+
+# Отбор игроков
+
+# Россия
+
+Найдём всех и посмотрим на табличку. Эти игроки нам пригодятся для того, чтобы увидеть, куда они попали после кластеризации. Ещё уберём тех игроков, для которых нет информации о зарплате (у них не фиксирован клуб и лига, это понадобится позже).
+
+```{r}
+nashi_parni <- which(players_full$nationality == "Russia" & players_full$value_eur != 0)
+url_nashi <- as.character(players_full$player_url[nashi_parni])
+cbind(players_full[nashi_parni, c(3,14,15,17,6,7,8, 9)], "") %>% kbl() %>% kable_paper("hover", full_width = F, position = "left") %>%
+    column_spec(6, color = "black", background = spec_color(players_full[nashi_parni, 6])) %>%
+    column_spec(7, color = "black", background = spec_color(players_full[nashi_parni, 7])) %>%
+    column_spec(8, color = "black", background = spec_color(players_full[nashi_parni, 8])) %>%
+    column_spec(9, color = "black", background = spec_color(players_full[nashi_parni, 9])) %>%
+    column_spec(4, color = spec_color(as.integer(players_full[nashi_parni, 15]))) %>%
+    column_spec(2, bold = T, link = url_nashi)
+```
+
+Русских столько: `r length(nashi_parni)`.
+
+# Мир
+
+Возьмём 50 самых лучших по оценке overall в FIFA футболистов (первые 50 строк)
+
+```{r}
+top_world <- 1:50
+url_world <- as.character(players_full$player_url[top_world])
+cbind(1:50, players_full[top_world, c(3,14,15,17,6,7,8,9)]) %>% kbl() %>% kable_paper("hover", full_width = F, position = "left") %>%
+    column_spec(6, color = "black", background = spec_color(players_full[top_world, 6])) %>%
+    column_spec(7, color = "black", background = spec_color(players_full[top_world, 7])) %>%
+    column_spec(8, color = "black", background = spec_color(players_full[top_world, 8])) %>%
+    column_spec(9, color = "black", background = spec_color(players_full[top_world, 9])) %>%
+    column_spec(4, color = spec_color(as.integer(players_full[top_world, 15]))) %>%
+    column_spec(2, bold = T, link = url_world)
+```
+
+# Кластеризация: первичные соображения 
+
+Позиций в футболе достаточно много, особенно если рассматривать в классификации, которая дана здесь
+
+```{r}
+unique(players_full$club_position)
+```
+
+R и L — right и left, F и B — forward и back, C — center, S - striker
+
+![](positions.jpeg)
+
+Если не учитывать голкиперов, то обычно мы говорим о защите, полузащите и нападении.
+В данном датасете присутствуют характеристики, которые _потенциально_ могут помочь в определении предположительной позиции.
+
+Давайте посмотрим, о каких характеристиках идёт речь:
+```{r}
+skills_vars <- c(35:40,41:74)
+names(players_full[,skills_vars])
+```
+
+Кажется, что характеристики должны хорошо различать атакующих игроков от игроков защиты и полузащиты. Полузащиту в данном случае можно воспринимать как универсальных игроков. Здесь нет намёка на правый/левый фланг и правша/левша, поэтому надеемся, что этот фактор не будет различать кластеры.
+
+Для того, чтобы кластеризация не пошла по возрасту/потенциалу/общему уровню игры, эти признаки мы тоже не включаем.
+
+Так как некоторые характеристик для голкиперов отсутствуют, да и явно есть отличие между вратарями и полевыми игроками, мы изымем их из рассмотрения. Характеристики, которые начинаются с "goalkeeping" мы оставим, они могут помочь различать защитников.
+
+```{r}
+library(stringr)
+goalkeepers <- str_detect(players_full$player_positions, "GK")
+head(goalkeepers)
+sum(goalkeepers)
+```
+
+Не так их и много.
+
+Ещё одна проблема заключается в том, что выборка большая и может включать в себя неоднородности, которые хотелось бы избежать. Например, в низших лигах границы между игроками могут быть размыты сильнее. Посмотрим, сколько игроков останется, если оставим только игроков команд высших лиг.
+
+```{r}
+top_leagues <- (players_full$league_level == 1)
+head(top_leagues)
+sum(top_leagues, na.rm = TRUE)
+```
+
+Также, по этим признакам у нас не должно быть NA, уберём их позже, их немного.
+
+Таким образом, остаётся столько футболистов:
+
+```{r}
+sum(top_leagues & !goalkeepers, na.rm = TRUE)
+```
+
+# Первичный анализ
+
+Признаков много, поэтому проведём минимальный анализ. Сделаем два датафрейма, один с интересующими нас признаками, другой — с общей информацией об игроке, чтобы потом удобно было анализировать результат. NA уберём, как обещали.
+
+```{r}
+players <- players_full[top_leagues & !goalkeepers, skills_vars]
+players <- na.omit(players)
+dim(players)
+players_info <- players_full[top_leagues & !goalkeepers, c(3,6,7,8,9,14,17,15,22,2)]
+players_info <- na.omit(players_info)
+dim(players_info)
+num_players <- nrow(players)
+```
+
+
+```{r}
+summary(players)
+```
+
+
+```{r, fig.height = 30, fig.width = 15}
+library(ggplot2)
+library(reshape2)
+library(viridis)
+players_m <- melt(players) 
+p <- ggplot(data = players_m, aes(y=variable, x=value, fill = variable, alpha = 0.7)) + 
+             geom_boxplot() + geom_violin() + scale_fill_manual(values = viridis(40)) + guides(fill = "none")
+p 
+```
+
+Как можно видеть, многие из приведённых графиков бимодальны, например, defending и attacking, что может быть хорошим знаком того, что кластеризация у нас получится (и может даже в нормальной модели)
+
+## Факторный анализ
+
+Попробуем сократить размерность пространства признаков и посмотрим на biplot.
+
+```{r}
+library("FactoMineR")
+library("factoextra")
+res <- PCA(players, scale.unit = TRUE, graph = FALSE, ncp = 5)
+fviz_pca_var(res)
+res$var$coord %>% kbl() %>% kable_paper("hover", full_width = F, position = "left") %>%
+    column_spec(2, color = "black", background = spec_color(abs(res$var$coord[,1]))) %>%
+    column_spec(3, color = "black", background = spec_color(abs(res$var$coord[,2])))
+```
+
+```{r}
+fviz_eig(res, addlabels = TRUE)
+```
+
+Первый фактор, по всей видимости, характеризует атакующую игру, а второй — защиту.
+
+Также построим biplot и найдём некоторых игроков, чтобы интерпретировать полученный результат.
+
+```{r}
+fviz_pca_biplot(res,
+                label = "all",
+                col.ind = (viridis(3))[1],
+                col.var = (viridis(3))[2],
+                )
+bestest <- c(1,4,3,5,29,15,23,16,61,47,56,115)
+cbind(bestest, as.character(players_info$short_name[bestest]), as.character(players_info$club_position[bestest]))  %>% kbl() %>% kable_paper("hover", full_width = F, position = "left")
+```
+
+
+
+Нельзя сказать, что получилось однозначно (из-за полузащиты). С Месси (1), Неймаром (4) и Де Брюйне (5, атакующий полузащитник) всё логично, они в атаке.  
+Махрез (47) сейчас полузащитник-вингер, однако помимо подключений к атакам, от этих полузащитников требуется защита их игровых зон от проходов крайних защитников и опорных соперника.
+Киммих (15) тоже полузащитник. А вот Агуэро (23), вообще говоря, нападающий. 
+Родри (56) - опорный полузащитник, поэтому немного странно, что он там, где есть.
+Впрочем, общая логика всё же присутствует.
+
+Кстати, нумерация идёт по общему рейтингу, хорошо видим, что слева внизу индексы большие.
+
+Отчётливо видим, что есть облака точек; можно увидеть два крупных или три поменьше. 
+
+# Кластеризация
+
+## SOM
+
+```{r}
+library(kohonen)
+set.seed(56788)
+data_matrix <- as.matrix(scale(players))
+# Create the SOM Grid - you generally have to specify the size of the 
+# training grid prior to training the SOM. Hexagonal and Circular 
+# topologies are possible
+som_grid <- somgrid(xdim = 20, ydim=20, topo="hexagonal")
+# Finally, train the SOM, options for the number of iterations,
+# the learning rates, and the neighbourhood are available
+som_model <- som(data_matrix, 
+        grid=som_grid, 
+        rlen=250, 
+        alpha=c(0.05,0.01), 
+        keep.data = TRUE)
+```
+
+```{r}
+plot(som_model, type="changes")
+```
+
+```{r}
+plot(som_model, type="count")
+```
+
+Это хорошо, что все игроки распределились по ячейкам равномерно. Может быть нужно увеличить карту, чтобы получилось поменьше индивидов на ячейку, но пока оставим так.
+
+```{r, warning = FALSE}
+coolBlueHotRed <- function(n, alpha = 1) {rainbow(n, end=4/6, alpha=alpha)[n:1]}
+som.hc <- cutree(hclust(object.distances(som_model, "codes")), 2)
+#pdf("heatmapkoh")
+par(mfrow = c(2,3))
+plot(som_model, type = "property", 
+     property = getCodes(som_model)[, 1], main = names(players)[1], palette.name = coolBlueHotRed)
+add.cluster.boundaries(som_model, som.hc, lwd = 4)
+plot(som_model, type = "property", 
+     property = getCodes(som_model)[, 2], main = names(players)[2], palette.name = coolBlueHotRed)
+add.cluster.boundaries(som_model, som.hc, lwd = 4)
+plot(som_model, type = "property", 
+     property = getCodes(som_model)[, 3], main = names(players)[3], palette.name = coolBlueHotRed)
+add.cluster.boundaries(som_model, som.hc, lwd = 4)
+plot(som_model, type = "property", 
+     property = getCodes(som_model)[, 4], main = names(players)[4], palette.name = coolBlueHotRed)
+add.cluster.boundaries(som_model, som.hc, lwd = 4)
+plot(som_model, type = "property", 
+     property = getCodes(som_model)[, 5], main = names(players)[5], palette.name = coolBlueHotRed)
+add.cluster.boundaries(som_model, som.hc, lwd = 4)
+plot(som_model, type = "property", 
+     property = getCodes(som_model)[, 6], main = names(players)[6], palette.name = coolBlueHotRed)
+add.cluster.boundaries(som_model, som.hc, lwd = 4)
+
+```
+
+% TODO:: записать некоторые объяснения того, что мы видим
+
+```{r, warning = FALSE}
+labs_som = rep("", nrow(players))
+labs_som[1:100] = abbreviate(players_info$short_name[1:100], 10)
+labs_som[players_info$nationality == "Russia"] = as.character(players_info$short_name[players_info$nationality == "Russia"])
+pdf()
+plot(som_model, type = "mapping", labels = labs_som, cex = 0.3)
+plot(som_model, type = "mapping", labels = labs_som, cex = 0.5, xlim = c(18,20), ylim = c(13,18))
+plot(som_model, type = "mapping", labels = labs_som, cex = 0.5, xlim = c(18,20), ylim = c(11,16))
+```
+```{r, warning = FALSE}
+plot(som_model, type = "mapping", labels = labs_som, cex = 0.3)
+plot(som_model, type = "mapping", labels = labs_som, cex = 0.5, xlim = c(0,3), ylim = c(13,18))
+plot(som_model, type = "mapping", labels = labs_som, cex = 0.5, xlim = c(0,3), ylim = c(11,16))
+```
+
+
+## Model-based пример: `mclust`
+
+Так как метод встречался ранее, пройдёмся по нему быстро
+
+Будем использовать известную библиотеку `mclust()`, которая строит сразу множество вариантов моделей кластеризации.
+
+```{r}
+library(mclust)
+#players_mclust <- Mclust(players, G = 1:4)
+```
+
+Здесь посмотрим на тот выбор, который делает функция `mclust()`. Этот выбор основывается на посчитанных характеристиках качества модели BIC и ICL. Так как нам известно, что значения BIC и ICL есть случайные числа, можно посмотреть какие ещё варианты кластеризации близки по этим значениям.
+
+```{r}
+#summary(players_mclust)
+```
+
+Метод выбрал разбиение на 9 кластеров, но это много для нас (убрал эту часть для скорости).
+
+*Наш выбор* основан на совокупности факторов:
+
+1. Значение байесовского информационного критерия модели (BIC) (больше --- лучше). Заметим, что значение BIC есть случайная величина, а значит будет весьма осмысленным рассмотреть несколько моделей с похожим BIC и разным числом кластеров и параметров.
+
+2. Число кластеров и число оцениваемых параметров
+Заметим здесь, что при сопоставимом значении BIC будем выбирать наиболее простую модель с наименьшим числом оцениваемых параметров, так как чем меньше параметров приходится оценивать, тем меньше будет дисперсия соответствующих оценок при фиксированном размере выборки. Мы хотели бы получить до четырёх кластеров.
+
+Посмотрим на все BIC, построим график.
+```{r}
+#playersBIC <- mclustBIC(players, G = 1:4)
+#bic_table <- playersBIC[,]
+#colnames(bic_table) <- colnames(playersBIC)
+#rownames(bic_table) <- 1:nrow(bic_table)
+```
+
+```{r}
+#bic_table[1:4,] %>% kbl() %>% kable_paper("hover")
+#plot(playersBIC, G = 1:4, ylim = c(-2935000,-2915000), legendArgs = list(x = "bottomright", ncol = 5))
+```
+
+Выбрали модель `VVV, 3`
+
+```{r}
+players_mclust <- Mclust(players, G = 3, modelNames = c("VVV"))
+summary(players_mclust)
+```
+
+На основании наших предположений и графика с главными компонентами можем именовать классы.
+
+```{r}
+classes_mclust <- as.factor(players_mclust$classification)
+table(players_mclust$classification)/num_players
+levels(classes_mclust) <- c("Defence","Midfielder","Attack")
+fviz_pca_biplot(res,
+                label = "all",
+                col.ind = classes_mclust,
+                legend.title = "Players")
+```
+
+### Uncertainty
+
+Качество кластеров можно оценить с помощью меры `uncertainty`, которая вычисляется так: из единицы вычитается вероятность наиболее вероятного класса. Это весьма неплохо показывает, насколько классы пересекаются.
+Посмотрим на различные квантили
+
+```{r}
+quantile(players_mclust$uncertainty, probs =c(0.6, 0.7, 0.8, 0.9, 0.95, 0.975, 0.99, 0.995))
+```
+
+Чтобы можно было сравнивать методы, посчитаем within SS/between SS
+```{r}
+# Subtract each value from the grand mean and get the number of observations in each cluster.
+data.cent <- scale(players, scale=FALSE)
+nrows <- table(classes_mclust)
+
+TSS <- sum(data.cent^2)
+
+WSS <- sapply(split(players, classes_mclust), function(x) sum(scale(x, scale=FALSE)^2))
+
+BSS <- TSS - sum(WSS)
+
+gmeans <- sapply(split(players, classes_mclust), colMeans)
+means <- colMeans(players)
+BSS <- sum(colSums((gmeans - means)^2) * nrows)
+
+BSS/TSS
+```
+
+### Мир
+Посмотрим на отдельныx игроков в таблице:
+
+```{r, echo=FALSE}
+players_top <- sort(c(bestest, 82, 37, 42, 11 , 38 , 14 , 24 , 30 , 84, 85))
+cbind(rate = rownames(players[players_top,]), name = as.character(players_info$short_name[players_top]), position = as.character(players_info$club_position[players_top]), mclust = as.character(classes_mclust)[players_top]) %>% kbl() %>% kable_paper(full_width = F, "hover") %>%
+    column_spec(4, color = "white", background = spec_color(as.numeric(classes_mclust[players_top]))) %>%
+    column_spec(2, color = "blue", bold = T, link = players_info$player_url[players_top])
+```
+
+### Россия
+
+```{r}
+russian <- (players_info$nationality == "Russia")
+cbind(rate = rownames(players[russian,]), name = as.character(players_info$short_name[russian]), position = as.character(players_info$club_position[russian]), mclust = as.character(classes_mclust)[russian]) %>% kbl() %>% kable_paper(full_width = F, "hover") %>%
+    column_spec(4, color = "white", background = spec_color(as.numeric(classes_mclust[russian]))) %>%
+    column_spec(2, color = "blue", bold = T, link = players_info$player_url[russian])
+```
+
+## Про выбор расстояния
+
+```{r}
+plot(1:40, players[1,], "l", col = "red", xlab = "variable", ylab = "points")
+lines(1:40, players[2,], col = "red")
+lines(1:40, players[1033,], col = "red", lty = 2)
+lines(1:40, players[11,], col = "blue")
+lines(1:40, players[12,], col = "blue")
+lines(1:40, players[3180,], col = "blue", lty = 2)
+cor(t(players[c(1,2, 1033, 16,15, 3180),]))
+dist((players[c(1,2, 1033, 16,15, 3180),]))
+legend("bottom", legend = c("Messi, 1", "Lewandowski, 2", "Smolov, 1033", "Casemiro, 15", "Van Dijk, 16", "Kudryashov, 3180"),  col = c("red", "red","red", "blue", "blue", "blue"), lwd = 1, lty = c(1,1,2,1,1,2))
+```
+
+## Иерархическая кластеризация
+
+TODO:: добавить entanglement
+https://uc-r.github.io/hc_clustering
+
+```{r}
+players_dist <- as.dist(1 - cor(t(players)))
+players_hclust <- hclust(players_dist, method="complete")
+plot(players_hclust, labels = labs_som, cex = 0.4, main = "Dendrogram (Complete linkage)")
+```
+
+```{r}
+library(easyr)
+classes_hclust <- cutree(players_hclust, k = 3)
+classes_hclust <- as.factor(classes_hclust)
+levels(classes_hclust) <- c("Attack", "Midfielder", "Defence")
+table(classes_hclust)/num_players
+```
+
+Кластер Defence стал значительно меньше (по сравнению с mclust).
+
+Посмотрим на биплот, убедимся в том, что результат в целом похож на то, что мы видели ранее.
+
+```{r}
+fviz_pca_biplot(res,
+                label = "all",
+                col.ind = classes_hclust,
+                legend.title = "Players")
+```
+
+### Качество
+
+Здесь опять же надо сделать замечание, что кластеры мы делали с помощью другого функционала (минимизировали корреляцию между индивидами), поэтому то, что приведено дальше — не совсем верно. 
+
+```{r}
+# Subtract each value from the grand mean and get the number of observations in each cluster.
+data.cent <- scale(players, scale=FALSE)
+nrows <- table(cutree(players_hclust, k = 3))
+
+TSS <- sum(data.cent^2)
+
+WSS <- sapply(split(players, classes_hclust), function(x) sum(scale(x, scale=FALSE)^2))
+
+BSS <- TSS - sum(WSS)
+
+gmeans <- sapply(split(players, classes_hclust), colMeans)
+means <- colMeans(players)
+BSS <- sum(colSums((gmeans - means)^2) * nrows)
+
+BSS/TSS
+```
+
+
+### Мир
+
+```{r, echo=FALSE}
+cbind(rate = rownames(players[players_top,]), name = as.character(players_info$short_name[players_top]), position = as.character(players_info$club_position[players_top]), hclust = as.character(classes_hclust)[players_top]) %>% kbl() %>% kable_paper(full_width = F, "hover") %>%
+    column_spec(4, color = "white", background = spec_color(as.numeric(classes_hclust[players_top]))) %>%
+    column_spec(2, color = "blue", bold = T, link = players_info$player_url[players_top])
+```
+
+### Россия
+
+```{r}
+russian <- (players_info$nationality == "Russia")
+cbind(rate = rownames(players[russian,]), name = as.character(players_info$short_name[russian]), position = as.character(players_info$club_position[russian]), hclust = as.character(classes_hclust)[russian]) %>% kbl() %>% kable_paper(full_width = F, "hover") %>%
+    column_spec(4, color = "white", background = spec_color(as.numeric(classes_hclust[russian]))) %>%
+    column_spec(2, color = "blue", bold = T, link = players_info$player_url[russian])
+```
+
+## $k$-средних для трёх классов
+
+```{r}
+set.seed(28)
+num_of_clust <- 3
+players_kmeans <- kmeans(players, num_of_clust)
+classes_kmeans <- players_kmeans$cluster
+```
+
+Число BSS/TSS:
+```{r}
+players_kmeans$betweenss/(sum(players_kmeans$withinss)+players_kmeans$betweenss)
+```
+
+### Мир
+
+```{r, echo=FALSE}
+cbind(rate = rownames(players[players_top,]), name = as.character(players_info$short_name[players_top]), position = as.character(players_info$club_position[players_top]), kmeans = as.character(classes_kmeans)[players_top]) %>% kbl() %>% kable_paper(full_width = F, "hover") %>%
+    column_spec(4, color = "white", background = spec_color(as.numeric(classes_kmeans[players_top]))) %>%
+    column_spec(2, color = "blue", bold = T, link = players_info$player_url[players_top])
+```
+
+### Россия
+
+```{r}
+russian <- (players_info$nationality == "Russia")
+cbind(rate = rownames(players[russian,]), name = as.character(players_info$short_name[russian]), position = as.character(players_info$club_position[russian]), kmeans = as.character(classes_kmeans)[russian]) %>% kbl() %>% kable_paper(full_width = F, "hover") %>%
+    column_spec(4, color = "white", background = spec_color(as.numeric(classes_kmeans[russian]))) %>%
+    column_spec(2, color = "blue", bold = T, link = players_info$player_url[russian])
+```
+
+## DBSCAN
+
+Для DBscan нужен оптимальный радиус окрестности. 
+Его можно определить приближённо с помощью kNN графика. 
+Датасет у нас большой, но для начала попробуем взять 5 соседей (это станет min pts).
+
+```{r}
+dbscan::kNNdistplot(players, k =  3)
+abline(h = 55, lty = 2)
+```
+
+Возьмём $\varepsilon = 55$.
+
+```{r}
+library(dbscan)
+players_dbscan <- dbscan(players, eps = 60, minPts = 3)
+```
+
+```{r}
+classes_dbscan <- players_dbscan$cluster
+fviz_pca_biplot(res,
+                label = "all",
+                col.ind = factor(classes_dbscan),
+                legend.title = "Players")
+```
+
+Попытаем счастье, взяв метрику с корреляциями.
+
+```{r}
+dbscan::kNNdistplot(players_dist, k = 5)
+abline(h = 0.08, lty = 2)
+```
+
+```{r}
+library(dbscan)
+players_dbscan <- dbscan(players_dist, eps = 0.05, minPts = 5)
+classes_dbscan <- players_dbscan$cluster
+```
+
+```{r}
+classes_dbscan <- players_dbscan$cluster
+fviz_pca_biplot(res,
+                label = "all",
+                col.ind = factor(classes_dbscan),
+                legend.title = "Players")
+```
+
+# Сравнение по методам
+
+```{r}
+cbind(rate = rownames(players[players_top,]), name = as.character(players_info$short_name[players_top]), position = as.character(players_info$club_position[players_top]), mclust = as.character(classes_mclust)[players_top],hclust = as.character(classes_hclust)[players_top], kmeans = as.character(classes_kmeans)[players_top], DBscan = as.character(classes_dbscan)[players_top] ) %>% kbl() %>% kable_paper(full_width = F, "hover") %>%
+    column_spec(2, color = "blue", bold = T, link = players_info$player_url[players_top])
+```
+
+```{r}
+cbind(rate = rownames(players[russian,]), name = as.character(players_info$short_name[russian]), position = as.character(players_info$club_position[russian]), mclust = as.character(classes_mclust)[russian],hclust = as.character(classes_hclust)[russian], kmeans = as.character(classes_kmeans)[russian], DBscan = as.character(classes_dbscan)[russian] ) %>% kbl() %>% kable_paper(full_width = F, "hover") %>%
+    column_spec(2, color = "blue", bold = T, link = players_info$player_url[russian])
+```
+
+
+# (*) Россия — Кипр
+```{r}
+cyprus <- (players_info$nationality == "Cyprus")
+f1 <- which(cyprus)
+f2 <- which(russian)
+factorr <- rep("", num_players)
+factorr[f1] <- "Cyprus"
+factorr[f2] <- "Russia"
+factorr <- as.factor(factorr)
+
+fviz_pca_biplot(res,
+                label = "ind",
+                col.ind = factorr,
+                legend.title = "Players from Russia and Cyprus",
+                select.ind = list(name = rownames(players_info[russian | cyprus,]))
+                )
+```
+
+# (**) Россия — Хорватия
+```{r}
+cyprus <- (players_info$nationality == "Croatia")
+f1 <- which(cyprus)
+f2 <- which(russian)
+factorr <- rep("", num_players)
+factorr[f1] <- "Cyprus"
+factorr[f2] <- "Russia"
+factorr <- as.factor(factorr)
+
+fviz_pca_biplot(res,
+                label = "ind",
+                col.ind = factorr,
+                legend.title = "Players from Russia and Cyprus",
+                select.ind = list(name = rownames(players_info[russian | cyprus,]))
+                )
+```
+
+
+## TODO:  Silhouettes
+
+
+
+<!-- Отметим, что жанр фильма может состоять из нескольких слов, поэтому в дальнейшем надо будет принимать решение о том, как эту информацию свести к одному слову, чтобы примерно охарактеризовать фильм в целом. -->
+
+<!-- Для некоторых фильмов нет информации об их прибыли, мы их уберём из датасета (это из за того, что для фильмов есть информация по мировому box office, но не по США).  -->
+
+<!-- ```{r} -->
+<!-- imdb_na_clean <- na.omit(imdb_full) -->
+<!-- dim(imdb_na_clean) -->
+<!-- ``` -->
+
+<!-- Осталось 838 фильмов, чего нам вполне достаточно для дальнейшего анализа. Для кластеризации нам будут нужны в численные переменные, кроме года, ещё добавим одну dummy variable, 1 для которой будет означать, что в жанре фильма присутствовало слово "action". -->
+
+<!-- ```{r} -->
+<!-- library(stringr) -->
+<!-- action <- str_detect(imdb_na_clean$Genre, "Action") -->
+
+<!-- imdb_gen <- cbind(imdb_na_clean, action = action) -->
+<!-- names(imdb_gen)[8] <- "Runtime" -->
+<!-- names(imdb_gen)[11] <- "Revenue" -->
+<!-- row.names(imdb_gen) <- 1:nrow(imdb_gen) -->
+<!-- ``` -->
+
+<!-- В предыдущей работе уже разобрались что логарифмировать и какие у нас аутлаеры, приведём здесь без разъяснений соответствующие графики. -->
+
+<!-- ```{r, include = FALSE} -->
+<!-- panel.hist <- function(x, ...) -->
+<!-- { -->
+<!--     usr <- par("usr"); on.exit(par(usr)) -->
+<!--     par(usr = c(usr[1:2], 0, 1.5) ) -->
+<!--     h <- hist(x, plot = FALSE) -->
+<!--     breaks <- h$breaks; nB <- length(breaks) -->
+<!--     y <- h$counts; y <- y/max(y) -->
+<!--     rect(breaks[-nB], 0, breaks[-1], y, col = "orange", ...) -->
+<!-- } -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- library(ggplot2) -->
+<!-- pairs(~ log(Runtime) + Rating + log(Votes) + log(Revenue) + Metascore, data = imdb_gen, diag.panel = panel.hist, pch = 19,  cex = 0.5) -->
+<!-- ``` -->
+
+<!-- Некоторую нелинейность можем заметить на `Rating vs. log(Revenue)`, что может свидетельствовать о возможной неоднородности в данных. -->
+
+<!-- Теперь АГК: -->
+
+<!-- ```{r} -->
+<!-- imdb_transf <- data.frame(title = imdb_gen$Title, year = imdb_gen$Year, log_runtime = log(imdb_gen$Runtime), rating = imdb_gen$Rating, log_votes = log(imdb_gen$Votes), log_revenue = log(imdb_gen$Revenue + 0.000001), metascore = imdb_gen$Metascore, ext_genre = imdb_gen$Genre, action = as.numeric(imdb_gen$action)) -->
+
+<!-- library("FactoMineR")  -->
+<!-- library("factoextra") -->
+<!-- quant_var <- c(3:7) -->
+<!-- res <- PCA(imdb_transf[,c(quant_var)], scale.unit = TRUE, graph = FALSE, ncp = 5) -->
+<!-- fviz_pca_var(res) -->
+<!-- ``` -->
+
+<!-- Также построим biplot и уберём несколько предположительных аутлаеров. -->
+
+<!-- ```{r} -->
+<!-- library(viridis) -->
+<!-- fviz_pca_biplot(res, -->
+<!--                 label = "all", -->
+<!--                 col.ind = (viridis(3))[1], -->
+<!--                 col.var = (viridis(3))[2], -->
+<!--                 legend.title = "Genres") -->
+<!-- outliers <- c(59, 287, 204, 223, 210, 704) -->
+<!-- imdb_transf$title[outliers] %>% kbl() %>% kable_paper(full_width = FALSE, position = "left", "hover") -->
+<!-- imdb_transf <- imdb_transf[-outliers,] -->
+<!-- row.names(imdb_transf) <- 1:nrow(imdb_transf) -->
+<!-- ``` -->
+
+<!-- ## Кластеризация -->
+
+<!-- ### Model-based -->
+
+<!-- Будем использовать известную библиотеку `mclust()`, которая строит сразу множество вариантов моделей кластеризации. -->
+
+<!-- ```{r} -->
+<!-- library(mclust) -->
+<!-- imdb_clust <- Mclust(imdb_transf[,c(quant_var)]) -->
+<!-- ``` -->
+
+<!-- Здесь посмотрим на тот выбор, который делает функция `mclust()`. Этот выбор основывается на посчитанных характеристиках качества модели BIC и ICL. Так как нам известно, что значения BIC и ICL есть случайные числа, можно посмотреть какие ещё варианты кластеризации близки по этим значениям. -->
+
+<!-- ```{r} -->
+<!-- summary(imdb_clust, parameters = TRUE) -->
+<!-- plot(imdb_clust, what = "classification") -->
+<!-- ``` -->
+
+<!-- *Наш выбор* будет основан на совокупности факторов: -->
+
+<!-- 1. Значение байесовского информ -->
+
+<!-- ационного критерия модели (BIC) (больше --- лучше). Заметим, что значение BIC есть случайная величина, а значит будет весьма осмысленным рассмотреть несколько моделей с похожим BIC и разным числом кластеров и параметров. -->
+<!-- 2. Число кластеров и число оцениваемых параметров -->
+<!-- Заметим здесь, что при сопоставимом значении BIC будем выбирать наиболее простую модель с наименьшим числом оцениваемых параметров, так как чем меньше параметров приходится оценивать, тем меньше будет дисперсия соответствующих оценок при фиксированном размере выборки. -->
+
+<!-- Посмотрим на все BIC, построим график. -->
+<!-- ```{r} -->
+<!-- imdbBIC <- mclustBIC(imdb_transf[,c(quant_var)]) -->
+<!-- bic_table <- imdbBIC[,] -->
+<!-- colnames(bic_table) <- colnames(imdbBIC) -->
+<!-- rownames(bic_table) <- 1:nrow(bic_table) -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- bic_table[1:4,] %>% kbl() %>% kable_paper("hover") -->
+
+<!-- plot(imdbBIC, G = 1:5, ylim = c(-15000,-12500), legendArgs = list(x = "bottomright", ncol = 5)) -->
+<!-- ``` -->
+
+<!-- Так как с увеличением числа кластеров число параметров смеси, которые надо оценить, может значительно возрасти, разумно рассмотреть варианты с меньшим числом компонент, обратив внимание на то, что значения BIC достаточно близки. Рассмотрим близкие по BIC варианты с двумя и тремя компонентами. -->
+
+<!-- Составим список кандидатов по возрастанию числа кластеров и запишем число оцениваемых параметров и BIC: -->
+
+<!-- |Модель| BIC | Число параметров (смесь + средние + объём + форма + поворот)| -->
+<!-- |----|----|-----| -->
+<!-- |`VVV, 2`|$-12849.14$ | $29 = 1 + 10 + 2 + 8 + 8$ |  -->
+<!-- |`VVE, 2`|$-12898.44$ | $25 = 1 + 10 + 2 + 8 + 4$ |  -->
+<!-- |`VVV, 3`|$-12816.21$ | $44 = 2 + 15 + 3 + 12 + 12$| -->
+<!-- |`VVE, 3`|$-12840.90$ | $36 = 2 + 15 + 3 + 12 + 4$| -->
+<!-- |`VVE, 4`|$-12792.01$ | $43 = 3 + 20 + 4 + 12 + 4$| -->
+
+<!-- По упомянутым соображениям о числе оцениваемых параметров и его влиянии на дисперсию оценок можно попробовать выбрать модели `VVV, 2` и `VVE, 2`. -->
+
+
+<!-- ```{r} -->
+<!-- imdbclust1 <- Mclust(imdb_transf[,c(quant_var)], G = 2, modelNames = c("VVV")) -->
+<!-- plot(imdbclust1, what = "classification") -->
+<!-- summary(imdbclust1) -->
+
+<!-- imdbclust2 <- Mclust(imdb_transf[,c(quant_var)], G = 2, modelNames = c("VVE")) -->
+<!-- plot(imdbclust2, what = "classification") -->
+<!-- summary(imdbclust2, parameters = TRUE) -->
+<!-- ``` -->
+
+<!-- Для дальнейшего анализа также сохраним себе вариант `VVV` с тремя кластерами. -->
+<!-- ```{r} -->
+<!-- imdbclust3 <- Mclust(imdb_transf[,c(quant_var)], G = 3, modelNames = c("VVV")) -->
+<!-- #plot(imdbclust3, what = "classification") -->
+<!-- summary(imdbclust3) -->
+<!-- ``` -->
+
+<!-- Отличаются они несильно, поэтому выберем вариант с наименьшим числом параметров: `VVE, 2`. -->
+
+<!-- ```{r} -->
+<!-- res <- PCA(imdb_transf[,c(quant_var)], scale.unit = TRUE, graph = FALSE, ncp = 5) -->
+<!-- fviz_pca_biplot(res, -->
+<!--                 label = "all", -->
+<!--                 col.ind = imdbclust2$classification, -->
+<!--                 legend.title = "Genres") -->
+<!-- ``` -->
+
+<!-- Посмотрим на отдельные фильмы в таблице: -->
+
+<!-- ```{r, echo=FALSE} -->
+<!-- chosen_movies <- c(1,5,7, 15,21,23,29,31,32,54,56,104,98,99, 46, 376, 569, 229, 159, 182, 537, 775, 792) -->
+<!-- cbind(as.character(imdb_transf$title[chosen_movies]), extendedGenre = as.character(imdb_transf$ext_genre[chosen_movies]), genre = as.character(imdb_transf$genre[chosen_movies]), rating = imdb_transf$rating[chosen_movies], revenue = round(imdb_transf$log_revenue[chosen_movies], 3) , votes = round(imdb_transf$log_votes[chosen_movies], 3), cluster = (as.character(imdbclust2$classification))[chosen_movies]) %>% kbl() %>% kable_paper(full_width = T, "hover") %>% column_spec(6, color = "black",  -->
+<!--               background = spec_color((imdbclust2$classification)[chosen_movies], alpha = 0.3, option = "E", direction = -1)) %>% column_spec(4, color = "black",  -->
+<!--               background = spec_color(round(imdb_transf$log_revenue[chosen_movies], 3), alpha = 0.3, option = "E")) %>% column_spec(5, color = "black",  -->
+<!--               background = spec_color(round(imdb_transf$log_votes[chosen_movies], 3), alpha = 0.3, option = "E")) %>% column_spec(3, color = "black",  -->
+<!--               background = spec_color(round(imdb_transf$rating[chosen_movies], 3), alpha = 0.3, option = "E"))  -->
+
+<!-- df_imdbb <- cbind(imdb_transf, imdbclust2$classification) -->
+<!-- ``` -->
+
+<!-- Если посмотреть на это, то в целом те фильмы, которые не оказались успешными в прокате (или плохой рейтинг, или мало просмотров), категоризуются как 2 класс. -->
+
+<!-- Отметим, что использование модельного метода кластеризации очевидно приводит к не очень удовлетворительным результатам в том числе и из-за того, что нормальность по отдельным (даже логарифмированным) переменным отсутствует. Поэтому ожидаемо, что кластеризация будет находить что-нибудь близкое к нормальному в области высокой плотности, а хвост рассматривать уже как что-то из другого облака. -->
+
+
+<!-- ### $k$-средних -->
+
+<!-- Нормализуем численные переменные датасета. -->
+
+<!-- ```{r} -->
+<!-- imdb_scaled <- cbind.data.frame(title = imdb_transf$title, runtime = scale(imdb_transf$log_runtime), rating = scale(imdb_transf$rating), revenue = scale(imdb_transf$log_revenue), votes = scale(imdb_transf$log_votes), metascore = scale(imdb_transf$metascore)) -->
+<!-- ``` -->
+
+<!-- Для метода $k$-средних приходится явно задавать количество кластеров, то есть нужно хотя-бы приблизительно иметь представление о том, что нужно искать. -->
+
+<!-- #### $k$-средних для двух классов -->
+
+<!-- Применим к данным метод $k$-средних для двух классов.  -->
+
+<!-- ```{r} -->
+<!-- num_of_clust <- 2 -->
+<!-- imdb_kmeans1 <- kmeans(imdb_scaled[,-1], num_of_clust) -->
+<!-- ``` -->
+
+<!-- Число BSS/TSS даёт некоторое представление о качестве построенной кластеризации. Единица означала бы идеальную отделимость двух кластеров -->
+<!-- ```{r} -->
+<!-- imdb_kmeans1$betweenss/(sum(imdb_kmeans1$withinss)+imdb_kmeans1$betweenss) -->
+<!-- ``` -->
+
+<!-- В данном случае число достаточно низкое, что и было ожидаемо (если смотреть на matrix plot и на главные компоненты). -->
+
+<!-- Построим попарный скеттерплот с раскраской по кластерам: -->
+
+<!-- ```{r} -->
+<!-- library(viridis) -->
+<!-- my_cols <- viridis(num_of_clust) -->
+<!-- pairs(imdb_scaled[,-1], col = my_cols[imdb_kmeans1$cluster], pch = 19,  cex = 0.5, oma=c(3,3,6,8)) -->
+<!-- par(xpd = TRUE) -->
+<!-- legend("bottomright", legend = 1:num_of_clust, col = my_cols, pch = 19,  cex = 0.5) -->
+<!-- title("Matrix Plot (group by k-means cluster)") -->
+<!-- ``` -->
+
+<!-- В данном случае разбиение не очень похоже на то, что мы получили раньше с методом смесей (в методе смесей облака чаще накладывались друг на друга). -->
+
+<!-- #### $k$-средних для трёх классов -->
+
+<!-- Теперь рассмотрим вариант с тремя кластерами. Напомним, что в работе по классификации у нас разбиение было по трём классам: 'drama', 'action', 'comedy'. Интересно, будет ли результат данной кластеризации иметь похожий смысл. -->
+
+<!-- ```{r} -->
+<!-- num_of_clust <- 3 -->
+<!-- imdb_kmeans2 <- kmeans(imdb_scaled[,-1], num_of_clust) -->
+<!-- ``` -->
+
+<!-- Число BSS/TSS: -->
+<!-- ```{r} -->
+<!-- imdb_kmeans2$betweenss/(sum(imdb_kmeans2$withinss)+imdb_kmeans2$betweenss) -->
+<!-- ``` -->
+
+<!-- В данном случае число увеличилось достаточно сильно, что может свидетельствовать о том, что увеличение числа кластеров сделали не зря. -->
+
+<!-- Также, как и в прошлый раз, построим скеттерплот с раскраской: -->
+
+<!-- ```{r} -->
+<!-- library(viridis) -->
+<!-- my_cols <- viridis(num_of_clust) -->
+<!-- pairs(imdb_scaled[,-1], col = my_cols[imdb_kmeans2$cluster], pch = 19,  cex = 0.5, oma=c(3,3,6,8)) -->
+<!-- par(xpd = TRUE) -->
+<!-- legend("bottomright", legend = 1:num_of_clust, col = my_cols, pch = 19,  cex = 0.5) -->
+<!-- title("Matrix Plot (group by k-means cluster)") -->
+<!-- ``` -->
+
+<!-- Данная картинка напоминает классификацию по жанрам (по расположениям центров облаков, как минимум). Посмотрим на таблицу, чтобы оценить, насколько хорошо выглядит разбиение без учителя (таблица, конечно, смещена к 1му классу из-за того, что в основном именно там есть известные и популярные фильмы) -->
+
+<!-- ```{r} -->
+<!-- cbind(as.character(imdb_transf$title[chosen_movies]), extendedGenre = as.character(imdb_transf$ext_genre[chosen_movies]), genre = as.character(imdb_transf$genre[chosen_movies]), rating = imdb_transf$rating[chosen_movies], revenue = round(imdb_transf$log_revenue[chosen_movies], 3) , votes = round(imdb_transf$log_votes[chosen_movies], 3), cluster = (as.character(imdb_kmeans2$cluster))[chosen_movies]) %>% kbl() %>% kable_paper(full_width = T, "hover") %>% column_spec(6, color = "black",  -->
+<!--               background = spec_color((imdb_kmeans2$cluster)[chosen_movies], alpha = 0.3, direction = 1)) %>% column_spec(4, color = "black",  -->
+<!--               background = spec_color(round(imdb_transf$log_revenue[chosen_movies], 3), alpha = 0.3, option = "E")) %>% column_spec(5, color = "black",  -->
+<!--               background = spec_color(round(imdb_transf$log_votes[chosen_movies], 3), alpha = 0.3, option = "E")) %>% column_spec(3, color = "black",  -->
+<!--               background = spec_color(round(imdb_transf$rating[chosen_movies], 3), alpha = 0.3, option = "E"))  -->
+<!-- ``` -->
+
+<!-- Можно видеть по этому примеру, что осмысленного разделения по жанрам здесь практически нет. Разве что экшн фильмы кластеризовались вместе с успешными фильмами других жанров, а это скорее сегментация на более/менее успешные фильмы. Это подтверждается и третьим кластером, к которому отнесены относительно малоуспешные фильмы. -->
+
+<!-- #### Сравнение результатов по model-based и k-means -->
+
+<!-- Посмотрим, насколько похожи кластеры, построенные по двум разным методам: model-based и k-means.  -->
+
+<!-- ##### Для двух кластеров -->
+
+<!-- ```{r} -->
+<!-- library("MASS") -->
+<!-- first <- which(imdbclust2$classification == 1) -->
+<!-- imdbclust2$classification[first] = 2 -->
+<!-- imdbclust2$classification[-first] = 1 #поменяли классы -->
+<!-- ct <- table(imdbclust2$classification, imdb_kmeans1$cluster) -->
+<!-- addmargins(ct) %>% kbl() %>% kable_paper("hover", full_width = F, position = "left") -->
+<!-- diag(prop.table(ct, 2)) %>% kbl() %>% kable_paper("hover", full_width = F, position = "left")  -->
+<!-- ``` -->
+<!-- Нельзя сказать, что они сильно похожи друг на друга. Совпадают они чуть более чем на половине наблюдений. -->
+
+<!-- ##### Для трёх кластеров -->
+
+<!-- ```{r} -->
+<!-- library("MASS") -->
+<!-- ct <- table(imdbclust3$classification, imdb_kmeans2$cluster) -->
+<!-- addmargins(ct) %>% kbl() %>% kable_paper("hover", full_width = F, position = "left") -->
+<!-- diag(prop.table(ct, 2)) %>% kbl() %>% kable_paper("hover", full_width = F, position = "left")  -->
+<!-- ``` -->
+
+<!-- В данном случае можно сказать, что методы оказались весьма близкими в разделении кластеров; совпадение на $80\%$. -->
+
+<!-- ### Иерархический кластерный анализ -->
+
+<!-- Признаки уже стандартизированы, поэтому расстояние между точками измерять будет несложно. -->
+
+<!-- ```{r} -->
+<!-- set.seed(1) -->
+<!-- labels <- as.character(imdb_scaled[,1]) -->
+<!-- more_movies <- c(chosen_movies, sample(1:nrow(imdb_scaled), 30)) -->
+<!-- labels[ -more_movies  ] <- "" -->
+<!-- ``` -->
+
+<!-- Будем пробовать с разными вариантами слияния кластеров. Подпишем некоторые фильмы на дендрограммах. -->
+
+<!-- Субъективным правилом иерархической кластеризации можно считать следующее: там, где ветка длиннее, там межкластерное расстояние больше, следовательно делить разумно там. Однако как и ожидается, на наших дендрограммах не ожидается хорошей отделимости, потому веточки везде будут достаточно короткими (здесь расстояния не в квадратах). -->
+
+<!-- ##### Расстояние дальнего соседа: -->
+
+<!-- Даже быстрый взгляд на дендрограммы (если посмотреть на некоторые близкие по смыслу "супергеройские" картины, они находятся далеко друг от друга) позволяет сказать, что кластерная структура при выборе такого типа связи здесь очень слабая. -->
+
+<!-- ```{r} -->
+<!-- hc <- hclust(dist(imdb_scaled[,-1], "euclidean"), method = "complete") -->
+<!-- plot(hc, hang = -10, labels = abbreviate(labels, 15), cex = 0.5) -->
+<!-- ``` -->
+
+<!-- ##### Групповое среднее расстояние -->
+
+<!-- Здесь связи кажутся немного более осмысленными и похожими на k-means, что логично. Тем не менее, чёткая структура здесь не проглядывается. -->
+
+<!-- ```{r} -->
+<!-- hc <- hclust(dist(imdb_scaled[,-1], "euclidean"), method = "average") -->
+<!-- plot(hc, hang = -10, labels = abbreviate(labels, 15), cex = 0.5) -->
+<!-- ``` -->
+
+<!-- ##### Center linkage -->
+
+<!-- Здесь как связи рассматриваются связи между центроидами кластеров. На эту дендрограмму смотреть не станем, так как структура слишком сильно переплетена. -->
+
+<!-- ```{r} -->
+<!-- hc <- hclust(dist(imdb_scaled[,-1], "euclidean"), method = "centroid") -->
+<!-- plot(hc, hang = -10, labels = abbreviate(labels, 15), cex = 0.5) -->
+<!-- ``` -->
+
+<!-- ##### Single linkage -->
+
+<!-- Здесь сложно что-нибудь увидеть ввиду того, что кластеры собираются по цепочке, добавляя по одному фильму. -->
+
+<!-- ```{r} -->
+<!-- hc <- hclust(dist(imdb_scaled[,-1], "euclidean"), method = "single") -->
+<!-- plot(hc, hang = -10, labels = abbreviate(labels, 15), cex = 0.5) -->
+<!-- ``` -->
+
+
+
+<!-- ## Выводы -->
+
+<!-- В рассмотренном датасете обнаружить хорошо отделимые кластеры не удалось, в данном случае можно лишь сегментировать данные на некоторые смысловые части, которые, в принципе, видны на поверхности.  -->
+
+<!-- В этот раз не использовали текстовую информацию о фильме, информацию про жанры, а также информацию об актёрах и режиссёрах. В дальнейшем было бы интересно использовать метрики, которые дают семантическое расстояние между текстами описания и близость между списками актёров и режиссёров. Тогда, полагаем, классификация без учителя оказалась бы более успешной. -->
