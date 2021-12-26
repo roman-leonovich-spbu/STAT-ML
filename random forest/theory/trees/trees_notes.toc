@@ -1,0 +1,24 @@
+\babel@toc {russian}{}
+\contentsline {section}{\numberline {1}Введение}{2}{}%
+\contentsline {subsection}{\numberline {1.1}Дерево}{2}{}%
+\contentsline {subsection}{\numberline {1.2}Бинарное дерево}{2}{}%
+\contentsline {subsection}{\numberline {1.3}Постановка задачи}{2}{}%
+\contentsline {section}{\numberline {2}Дано}{3}{}%
+\contentsline {section}{\numberline {3}Вероятностная постановка}{4}{}%
+\contentsline {subsection}{\numberline {3.1}Генеральная постановка}{4}{}%
+\contentsline {subsection}{\numberline {3.2}Выборочная постановка}{4}{}%
+\contentsline {section}{\numberline {4}Регрессионные деревья}{5}{}%
+\contentsline {subsection}{\numberline {4.1}Пример регрессии}{6}{}%
+\contentsline {section}{\numberline {5}Классификационные деревья}{8}{}%
+\contentsline {subsubsection}{\numberline {5.0.1}Частота ошибок классификации}{8}{}%
+\contentsline {subsubsection}{\numberline {5.0.2}Индекс Джинни}{8}{}%
+\contentsline {subsubsection}{\numberline {5.0.3}Кросс-энтропия}{10}{}%
+\contentsline {section}{\numberline {6}Алгоритмы}{12}{}%
+\contentsline {subsection}{\numberline {6.1}CART (использует Индекс Джини)}{12}{}%
+\contentsline {subsection}{\numberline {6.2}ID3 (использует Кросс-энтропию)}{12}{}%
+\contentsline {subsection}{\numberline {6.3}Стрижка деревьев}{13}{}%
+\contentsline {subsection}{\numberline {6.4}Пример классификации: данные о бейсболе}{15}{}%
+\contentsline {subsection}{\numberline {6.5}Пример классификации: данные о сердце}{17}{}%
+\contentsline {section}{\numberline {7}Подведение итогов}{19}{}%
+\contentsline {subsection}{\numberline {7.1}Сравнение деревьев с линейными моделями}{19}{}%
+\contentsline {subsection}{\numberline {7.2}Преимущества и недостатки рещающих деревьев}{19}{}%
