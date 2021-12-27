@@ -3,7 +3,7 @@ title: "Кластеризация игроков из FIFA 22"
 output:
     html_document:
         #folding of code
-        code_folding: hide
+        code_folding: show
         #highliting of the code
         highlight: tango
         #theme of the document (see bootswatch.com)
@@ -26,25 +26,63 @@ knitr::opts_chunk$set(echo = TRUE)
 
 # Введение
 
-Хотим провести кластеризацию футбольных игроков
+Хотим провести кластеризацию футбольных игроков из датасета футбольного симулятора FIFA 22.
 
-### Описание и чистка
+Футболисты играют на разных позициях, однако такие обобщения позиций, как атака, полузащита, и защита, весьма неточны и по тем же причинам не указываются в данных. В то же время, такие обобщения весьма полезны для простого описания для игрока.
+
+Наше предположение состоит в том, что на основании рейтингов игроков по различным характеристикам кластеризация поможет достаточно неплохо различать игроков атаки, полузащиты, и защиты.
+
+## Описание и чистка
+
+Начнём с библиотек.
 
 ```{r}
-players_full <- read.csv("players_22.csv")
+#install.packages(c("knitr", "kableExtra", "magick",
+#                   "ggplot2", "reshape2", "viridis",
+#                   "stringr", "FactoMineR", "factorextra",
+#                   "kohonen", "mclust", "dbscan", "easyr"))
+library(knitr) 
+library(kableExtra) #красивые html таблицы
+library(magick)     #работа с картинками
+library(ggplot2)    #графики
+library(reshape2)   #работа с датафреймом
+library(viridis)    #палитра
+library(stringr)    #работа с текстом
+library(FactoMineR) #факторный анализ
+library(factoextra) #факторный анализ
+library(kohonen)    #self-organised maps/SOM 
+library(mclust)     #
+library(dbscan)     #DBscan метод
+library(easyr)
+```
+
+Читаем датасет из csv файла и смотрим на размерность.
+
+```{r}
+players_full <- read.csv("players_22.csv") #полный датафрейм
 dim(players_full)
 ```
 
+На примере двух известных футболистов покажем, какие переменные у нас имеются.
 Вот так, например, выглядит строчка для Лионеля Месси:
 
 ```{r}
-library(knitr)
-library(kableExtra)
-library(magick)
 cbind(1:107,t(players_full[c(1,3),])) %>% kbl() %>% kable_paper("hover", full_width = F, position = "left")
 ```
 
+Конечно, в дальнейшем отберём именно те признаки, которые предположительно помогут различать позицию игрока.
+
 # Отбор игроков
+
+Так как мы занимаемся кластеризацией, у нас по результатам не будет возможности автоматически проверить результаты работы алгоритмов.
+Поэтому важно, чтобы результаты были осмысленными хотя бы для тех случаев, которые нам неплохо знакомы. 
+Для этого возьмём две группы игроков, которые помогут убедиться в разумности построенных моделей:
+
+- Российские игроки
+- Лучшие игроки мира (по общему рейтингу FIFA)
+
+Всегда возникает обоснованное опасение, что кластеризация произойдёт с учётом общего уровня игроков (например, для топовых игроков кластеризация получилась хорошо, а для "средних" игроков всё перемешалось), поэтому анализировать результаты на основе лишь топовых игроков не совсем корректно.
+Российские игроки в целом представлены равномерно по всей таблице, что позволяет оценивать результаты на основе наших знаний.
 
 # Россия
 
@@ -53,7 +91,8 @@ cbind(1:107,t(players_full[c(1,3),])) %>% kbl() %>% kable_paper("hover", full_wi
 ```{r}
 nashi_parni <- which(players_full$nationality == "Russia" & players_full$value_eur != 0)
 url_nashi <- as.character(players_full$player_url[nashi_parni])
-cbind(players_full[nashi_parni, c(3,14,15,17,6,7,8, 9)], "") %>% kbl() %>% kable_paper("hover", full_width = F, position = "left") %>%
+#далее то, что нужно для таблицы
+cbind(players_full[nashi_parni, c(3,14,15,17,6,7,8,9)], "") %>% kbl() %>% kable_paper("hover", full_width = F, position = "left") %>%
     column_spec(6, color = "black", background = spec_color(players_full[nashi_parni, 6])) %>%
     column_spec(7, color = "black", background = spec_color(players_full[nashi_parni, 7])) %>%
     column_spec(8, color = "black", background = spec_color(players_full[nashi_parni, 8])) %>%
@@ -62,11 +101,11 @@ cbind(players_full[nashi_parni, c(3,14,15,17,6,7,8, 9)], "") %>% kbl() %>% kable
     column_spec(2, bold = T, link = url_nashi)
 ```
 
-Русских столько: `r length(nashi_parni)`.
+Русских здесь столько: `r length(nashi_parni)`.
 
 # Мир
 
-Возьмём 50 самых лучших по оценке overall в FIFA футболистов (первые 50 строк)
+Возьмём 50 самых лучших по оценке overall в FIFA футболистов (первые 50 строк).
 
 ```{r}
 top_world <- 1:50
@@ -82,7 +121,7 @@ cbind(1:50, players_full[top_world, c(3,14,15,17,6,7,8,9)]) %>% kbl() %>% kable_
 
 # Кластеризация: первичные соображения 
 
-Позиций в футболе достаточно много, особенно если рассматривать в классификации, которая дана здесь
+Позиций в футболе достаточно много, особенно если рассматривать в классификации, которая дана здесь и в таблице.
 
 ```{r}
 unique(players_full$club_position)
@@ -101,26 +140,23 @@ skills_vars <- c(35:40,41:74)
 names(players_full[,skills_vars])
 ```
 
-Кажется, что характеристики должны хорошо различать атакующих игроков от игроков защиты и полузащиты. Полузащиту в данном случае можно воспринимать как универсальных игроков. Здесь нет намёка на правый/левый фланг и правша/левша, поэтому надеемся, что этот фактор не будет различать кластеры.
+Кажется, что эти характеристики должны хорошо различать атакующих игроков от игроков защиты и полузащиты. Полузащиту в данном случае можно воспринимать как универсальных игроков. Здесь нет намёка на правый/левый фланг и правша/левша, поэтому надеемся, что этот фактор не будет влиять на формирование кластеров.
 
-Для того, чтобы кластеризация не пошла по возрасту/потенциалу/общему уровню игры, эти признаки мы тоже не включаем.
+**Для того, чтобы кластеризация не пошла по возрасту/потенциалу/общему уровню игры/стоимости, эти признаки мы тоже не включаем.**
 
-Так как некоторые характеристик для голкиперов отсутствуют, да и явно есть отличие между вратарями и полевыми игроками, мы изымем их из рассмотрения. Характеристики, которые начинаются с "goalkeeping" мы оставим, они могут помочь различать защитников.
+Так как некоторые характеристик для голкиперов отсутствуют, да и явно есть отличие между вратарями и полевыми игроками, мы изымем их из рассмотрения. Характеристики, которые начинаются с "goalkeeping" мы оставим, они могут помочь различать защитников, которые по долгу службы должны участвовать в защите ворот.
 
 ```{r}
-library(stringr)
 goalkeepers <- str_detect(players_full$player_positions, "GK")
-head(goalkeepers)
 sum(goalkeepers)
 ```
 
 Не так их и много.
 
-Ещё одна проблема заключается в том, что выборка большая и может включать в себя неоднородности, которые хотелось бы избежать. Например, в низших лигах границы между игроками могут быть размыты сильнее. Посмотрим, сколько игроков останется, если оставим только игроков команд высших лиг.
+Ещё одна проблема заключается в том, что выборка большая и может включать в себя потенциальные неоднородности, которые хотелось бы избежать. Например, в низших лигах границы между игроками могут быть размыты сильнее. Посмотрим, сколько игроков останется, если оставим только игроков команд высших лиг.
 
 ```{r}
 top_leagues <- (players_full$league_level == 1)
-head(top_leagues)
 sum(top_leagues, na.rm = TRUE)
 ```
 
@@ -134,7 +170,8 @@ sum(top_leagues & !goalkeepers, na.rm = TRUE)
 
 # Первичный анализ
 
-Признаков много, поэтому проведём минимальный анализ. Сделаем два датафрейма, один с интересующими нас признаками, другой — с общей информацией об игроке, чтобы потом удобно было анализировать результат. NA уберём, как обещали.
+Признаков много, поэтому проведём минимальный анализ. 
+Сделаем два датафрейма, один с интересующими нас признаками, другой — с общей информацией об игроке, чтобы потом удобно было анализировать результат. NA уберём, как обещали.
 
 ```{r}
 players <- players_full[top_leagues & !goalkeepers, skills_vars]
@@ -146,31 +183,98 @@ dim(players_info)
 num_players <- nrow(players)
 ```
 
+## Summary по признакам {.tabset .tabset-pills}
 
 ```{r}
 summary(players)
 ```
 
+### Основные переменные
 
-```{r, fig.height = 30, fig.width = 15}
-library(ggplot2)
-library(reshape2)
-library(viridis)
-players_m <- melt(players) 
+```{r}
+players_m <- melt(players[,1:6]) 
 p <- ggplot(data = players_m, aes(y=variable, x=value, fill = variable, alpha = 0.7)) + 
-             geom_boxplot() + geom_violin() + scale_fill_manual(values = viridis(40)) + guides(fill = "none")
+             geom_boxplot() + geom_violin() + scale_fill_manual(values = viridis(6)) + guides(fill = "none")
 p 
 ```
 
-Как можно видеть, многие из приведённых графиков бимодальны, например, defending и attacking, что может быть хорошим знаком того, что кластеризация у нас получится (и может даже в нормальной модели)
+### Атака
+
+```{r}
+players_m <- melt(players[,7:11]) 
+p <- ggplot(data = players_m, aes(y=variable, x=value, fill = variable, alpha = 0.7)) + 
+             geom_boxplot() + geom_violin() + scale_fill_manual(values = viridis(6)) + guides(fill = "none")
+p 
+```
+
+### Опыт
+
+```{r}
+players_m <- melt(players[,12:16]) 
+p <- ggplot(data = players_m, aes(y=variable, x=value, fill = variable, alpha = 0.7)) + 
+             geom_boxplot() + geom_violin() + scale_fill_manual(values = viridis(6)) + guides(fill = "none")
+p 
+```
+
+### Движение
+
+```{r}
+players_m <- melt(players[,17:21]) 
+p <- ggplot(data = players_m, aes(y=variable, x=value, fill = variable, alpha = 0.7)) + 
+             geom_boxplot() + geom_violin() + scale_fill_manual(values = viridis(6)) + guides(fill = "none")
+p 
+```
+
+### Энергия
+
+```{r}
+players_m <- melt(players[,22:26]) 
+p <- ggplot(data = players_m, aes(y=variable, x=value, fill = variable, alpha = 0.7)) + 
+             geom_boxplot() + geom_violin() + scale_fill_manual(values = viridis(6)) + guides(fill = "none")
+p 
+```
+
+### Ментальность
+
+```{r}
+players_m <- melt(players[,27:32]) 
+p <- ggplot(data = players_m, aes(y=variable, x=value, fill = variable, alpha = 0.7)) + 
+             geom_boxplot() + geom_violin() + scale_fill_manual(values = viridis(6)) + guides(fill = "none")
+p 
+```
+
+### Защита
+
+```{r}
+players_m <- melt(players[,33:35]) 
+p <- ggplot(data = players_m, aes(y=variable, x=value, fill = variable, alpha = 0.7)) + 
+             geom_boxplot() + geom_violin() + scale_fill_manual(values = viridis(6)) + guides(fill = "none")
+p 
+```
+
+### На воротах
+
+```{r}
+players_m <- melt(players[,36:40]) 
+p <- ggplot(data = players_m, aes(y=variable, x=value, fill = variable, alpha = 0.7)) + 
+             geom_boxplot() + geom_violin() + scale_fill_manual(values = viridis(6)) + guides(fill = "none")
+p 
+```
+
+Как можно видеть, многие из приведённых графиков бимодальны, например, defending и attacking, что может быть хорошим знаком того, что кластеризация у нас получится (и может даже в нормальной модели).
+
+Что касается вратарских качеств: их, по всей видимости можно (и нужно) убрать, они вряд ли нам помогут.
+
+```{r}
+players <- players[, -c(36:40)]
+```
+
 
 ## Факторный анализ
 
 Попробуем сократить размерность пространства признаков и посмотрим на biplot.
 
 ```{r}
-library("FactoMineR")
-library("factoextra")
 res <- PCA(players, scale.unit = TRUE, graph = FALSE, ncp = 5)
 fviz_pca_var(res)
 res$var$coord %>% kbl() %>% kable_paper("hover", full_width = F, position = "left") %>%
@@ -183,8 +287,9 @@ fviz_eig(res, addlabels = TRUE)
 ```
 
 Первый фактор, по всей видимости, характеризует атакующую игру, а второй — защиту.
+Первые две компоненты неплохо описывают дисперсию признаков, поэтому плоскость первых двух компонент весьма полезна для дальнейшей интерпретации.
 
-Также построим biplot и найдём некоторых игроков, чтобы интерпретировать полученный результат.
+Построим biplot и найдём некоторых игроков, чтобы интерпретировать полученный результат.
 
 ```{r}
 fviz_pca_biplot(res,
@@ -196,24 +301,37 @@ bestest <- c(1,4,3,5,29,15,23,16,61,47,56,115)
 cbind(bestest, as.character(players_info$short_name[bestest]), as.character(players_info$club_position[bestest]))  %>% kbl() %>% kable_paper("hover", full_width = F, position = "left")
 ```
 
-
-
 Нельзя сказать, что получилось однозначно (из-за полузащиты). С Месси (1), Неймаром (4) и Де Брюйне (5, атакующий полузащитник) всё логично, они в атаке.  
 Махрез (47) сейчас полузащитник-вингер, однако помимо подключений к атакам, от этих полузащитников требуется защита их игровых зон от проходов крайних защитников и опорных соперника.
 Киммих (15) тоже полузащитник. А вот Агуэро (23), вообще говоря, нападающий. 
-Родри (56) - опорный полузащитник, поэтому немного странно, что он там, где есть.
+Родри (56) - опорный полузащитник, поэтому немного странно, что он там, где есть (хотя, опять же, мы видим только двумерную картинку).
 Впрочем, общая логика всё же присутствует.
 
 Кстати, нумерация идёт по общему рейтингу, хорошо видим, что слева внизу индексы большие.
 
-Отчётливо видим, что есть облака точек; можно увидеть два крупных или три поменьше. 
+**Отчётливо видим, что есть облака точек; можно увидеть два крупных или три поменьше. **
 
 # Кластеризация
 
+Переходим к применению алгоритмов кластеризации.
+Рассмотрим несколько известных алгоритмов:
+
+1. Kohonen's Self-Organized Maps
+
+2. Mclust
+
+3. Иерархическая кластеризация
+
+4. $k$ средних
+
+5. DBscan
+
 ## SOM
 
+Начнём с самоорганизующихся карт Кохонена, которые широко используются для уменьшения размерности данных.
+
 ```{r}
-library(kohonen)
+start_time <- Sys.time()
 set.seed(56788)
 data_matrix <- as.matrix(scale(players))
 # Create the SOM Grid - you generally have to specify the size of the 
@@ -224,10 +342,19 @@ som_grid <- somgrid(xdim = 20, ydim=20, topo="hexagonal")
 # the learning rates, and the neighbourhood are available
 som_model <- som(data_matrix, 
         grid=som_grid, 
-        rlen=250, 
+        rlen=3000, 
         alpha=c(0.05,0.01), 
         keep.data = TRUE)
+end_time <- Sys.time()
+end_time - start_time
 ```
+
+### Выбор параметров
+
+Начинаем с выбора сетки: все игроки расположатся в одной из 20х20 ячеек. Выбор размера базируется на колиичестве индивидов в каждой ячейке: их должно быть не менее 10 (см. дальше, как это увидеть). 
+
+`rlen` отвечает за число итераций. Число итераций выбирается с использованием графика ниже. 
+
 
 ```{r}
 plot(som_model, type="changes")
@@ -237,11 +364,74 @@ plot(som_model, type="changes")
 plot(som_model, type="count")
 ```
 
-Это хорошо, что все игроки распределились по ячейкам равномерно. Может быть нужно увеличить карту, чтобы получилось поменьше индивидов на ячейку, но пока оставим так.
+На данной картинке показано, сколько индивидов находится в каждой из ячеек. Если смотреть на это как на карту, это аналог плотности населения. Красный цвет - в данном случае означает мало.
+Если в одной ячейке много индивидов - значит оказалось, что они похожи друг на друга. При необходимости следует увеличивать размерность сетки, чтобы они стали различимыми. У нас есть одна ячейка с 70 индивидами
+
+Это хорошо, что все игроки распределились по ячейкам более менее равномерно. Может быть нужно увеличить карту, чтобы получилось поменьше индивидов на ячейку, но пока оставим так.
+
+### Карты {.tabset .tabset-pills}
+
+Переходим к главным объектам - самим картам.
+
+```{r, warning = FALSE}
+#здесь просто текстовые лейблы делаем
+labs_som = rep("", nrow(players))
+labs_som[1:100] = abbreviate(players_info$short_name[1:100], 10)
+labs_som[players_info$nationality == "Russia"] = as.character(players_info$short_name[players_info$nationality == "Russia"])
+# это чтобы легче было раглядеть, можно экспортировать в рабочую папку pdf файл
+# pdf()
+# plot(som_model, type = "mapping", labels = labs_som, cex = 0.3)
+# plot(som_model, type = "mapping", labels = labs_som, cex = 0.5, xlim = c(18,20), ylim = c(13,18))
+# plot(som_model, type = "mapping", labels = labs_som, cex = 0.5, xlim = c(18,20), ylim = c(11,16))
+```
+
+#### Кто где {.tabset}
+
+Для лучшего осознания того, что вообще на этих картах изображено, давайте покажем, в каких ячейках оказались футболисты топ уровня и наши соотечественники (они смешаны).
+
+Здесь неплохо видно, что произошло. Все топовые игроки сместились в левую часть, однако хорошие защитники образовали кластер в правом верхнем углу. 
+
+Если продолжать аналогию с картами, то 
+
+- В левом вернем углу страна продвинутых полузащитников; 
+- Тоже слева, но ближе к центру страна продвинутых нападающих;
+- Справа вверху страна защитников;
+- В центре универсальные молодые игроки. Продвинутых здесь несколько, но не международного класса.
+
+С интерпретацией других мест на карте сложнее. Может станет лучше дальше, когда будем раскрашивать карту по признакам. 
+
+Видим, что некоторая логика у такой карты есть. На вкладках можно чуть получше рассмотреть имена.
+
+##### Общий вид
+
+```{r, warning = FALSE}
+plot(som_model, type = "mapping", labels = labs_som, cex = 0.5)
+text(x = 1, y = 16, cex = 2, labels = "midfield", col = "green")
+text(x = 1, y = 12, cex = 2, labels = "attack", col = "red")
+text(x = 16, y = 14.5, cex = 2, labels = "defence", col = "blue")
+```
+
+##### Правая часть 
+
+```{r, warning = FALSE}
+plot(som_model, type = "mapping", labels = labs_som, cex = 0.5, xlim = c(16,17), ylim = c(14,18))
+```
+
+##### Левая часть 
+
+```{r, warning = FALSE}
+plot(som_model, type = "mapping", labels = labs_som, cex = 0.5, xlim = c(0,2), ylim = c(14,18))
+plot(som_model, type = "mapping", labels = labs_som, cex = 0.5, xlim = c(0,3), ylim = c(10,13))
+```
+
+#### Карта с раскрасками
+
+Раскрасим ячейки по признакам, а также разделим карту на части, максимально отдалённые друг от друга, с помощью  жирной линии (для этого используется иерархическая кластеризация, см. комментарии).
 
 ```{r, warning = FALSE}
 coolBlueHotRed <- function(n, alpha = 1) {rainbow(n, end=4/6, alpha=alpha)[n:1]}
-som.hc <- cutree(hclust(object.distances(som_model, "codes")), 2)
+#k есть число желаемых групп для разделения
+som.hc <- cutree(hclust(object.distances(som_model, "codes")), k=2)
 #pdf("heatmapkoh")
 par(mfrow = c(2,3))
 plot(som_model, type = "property", 
@@ -265,39 +455,29 @@ add.cluster.boundaries(som_model, som.hc, lwd = 4)
 
 ```
 
-% TODO:: записать некоторые объяснения того, что мы видим
+Можно долго смотреть и анализировать, что получилось. 
 
-```{r, warning = FALSE}
-labs_som = rep("", nrow(players))
-labs_som[1:100] = abbreviate(players_info$short_name[1:100], 10)
-labs_som[players_info$nationality == "Russia"] = as.character(players_info$short_name[players_info$nationality == "Russia"])
-pdf()
-plot(som_model, type = "mapping", labels = labs_som, cex = 0.3)
-plot(som_model, type = "mapping", labels = labs_som, cex = 0.5, xlim = c(18,20), ylim = c(13,18))
-plot(som_model, type = "mapping", labels = labs_som, cex = 0.5, xlim = c(18,20), ylim = c(11,16))
-```
-```{r, warning = FALSE}
-plot(som_model, type = "mapping", labels = labs_som, cex = 0.3)
-plot(som_model, type = "mapping", labels = labs_som, cex = 0.5, xlim = c(0,3), ylim = c(13,18))
-plot(som_model, type = "mapping", labels = labs_som, cex = 0.5, xlim = c(0,3), ylim = c(11,16))
-```
+Если посмотреть на раскраску по shooting, то неудивительно, что в левой части расположились практически все атакующие игроки. Поднимаясь слева наверх, видим улучшение по параметру передач, физической форме, темпу, и более высокие показатели по защите, при этом немного ухудшается shooting - чистая качественная полузащита. С защитой тоже всё понятно - лучшие - в правом верхнем углу.
 
+И так далее...
 
 ## Model-based пример: `mclust`
 
-Так как метод встречался ранее, пройдёмся по нему быстро
+Так как метод встречался ранее, пройдёмся по нему быстро.
+Предполагается смесь нескольких нормальных распределений.
 
 Будем использовать известную библиотеку `mclust()`, которая строит сразу множество вариантов моделей кластеризации.
 
 ```{r}
-library(mclust)
-#players_mclust <- Mclust(players, G = 1:4)
+players_mclust <- Mclust(players, G = 1:4)
 ```
+
+Параметр G отвечает за число кластеров. В данном случае будут строиться всевозможные модели от 1 до 4 кластеров.
 
 Здесь посмотрим на тот выбор, который делает функция `mclust()`. Этот выбор основывается на посчитанных характеристиках качества модели BIC и ICL. Так как нам известно, что значения BIC и ICL есть случайные числа, можно посмотреть какие ещё варианты кластеризации близки по этим значениям.
 
 ```{r}
-#summary(players_mclust)
+summary(players_mclust)
 ```
 
 Метод выбрал разбиение на 9 кластеров, но это много для нас (убрал эту часть для скорости).
@@ -311,25 +491,25 @@ library(mclust)
 
 Посмотрим на все BIC, построим график.
 ```{r}
-#playersBIC <- mclustBIC(players, G = 1:4)
-#bic_table <- playersBIC[,]
-#colnames(bic_table) <- colnames(playersBIC)
-#rownames(bic_table) <- 1:nrow(bic_table)
+playersBIC <- mclustBIC(players, G = 1:4)
+bic_table <- playersBIC[,]
+colnames(bic_table) <- colnames(playersBIC)
+rownames(bic_table) <- 1:nrow(bic_table)
 ```
 
 ```{r}
-#bic_table[1:4,] %>% kbl() %>% kable_paper("hover")
-#plot(playersBIC, G = 1:4, ylim = c(-2935000,-2915000), legendArgs = list(x = "bottomright", ncol = 5))
+bic_table[1:4,] %>% kbl() %>% kable_paper("hover")
+plot(playersBIC, G = 1:4, legendArgs = list(x = "bottomright", ncol = 5))
 ```
 
-Выбрали модель `VVV, 3`
+Выбрали модель `VVV, 3` (VVV означает, что эллипсоиды распределений вообще никаким образом не совпадают (разный поворот, разный объём, и тд), это максимальное количество параметров)
 
 ```{r}
 players_mclust <- Mclust(players, G = 3, modelNames = c("VVV"))
 summary(players_mclust)
 ```
 
-На основании наших предположений и графика с главными компонентами можем именовать классы.
+На основании наших предположений и графика с главными компонентами можем именовать классы. Построим биплот, чтобы оценить результат визуально.
 
 ```{r}
 classes_mclust <- as.factor(players_mclust$classification)
@@ -343,14 +523,19 @@ fviz_pca_biplot(res,
 
 ### Uncertainty
 
-Качество кластеров можно оценить с помощью меры `uncertainty`, которая вычисляется так: из единицы вычитается вероятность наиболее вероятного класса. Это весьма неплохо показывает, насколько классы пересекаются.
-Посмотрим на различные квантили
+Качество кластеров можно оценить с помощью меры `uncertainty`, которая вычисляется так: из единицы вычитается вероятность наиболее вероятного класса. Uncertainty должна быть малой для наибольшего числа индивидов.
+Это весьма неплохо показывает, насколько классы пересекаются.
+
+Мера встроена в полученный объект от mclust.
+Посмотрим на различные квантили:
 
 ```{r}
 quantile(players_mclust$uncertainty, probs =c(0.6, 0.7, 0.8, 0.9, 0.95, 0.975, 0.99, 0.995))
 ```
 
-Чтобы можно было сравнивать методы, посчитаем within SS/between SS
+Видим, что у абсолютного большинства индивидов мера uncertainty мала (у $95\%$ индивидов мера меньше 0.25, что существенно лучше наихудшего возможного исхода в нашем случае $G=3$: $0.666$), что хорошо оценивает работу метода.
+
+Чтобы можно было сравнивать все методы, посчитаем within SS/between SS
 ```{r}
 # Subtract each value from the grand mean and get the number of observations in each cluster.
 data.cent <- scale(players, scale=FALSE)
@@ -388,6 +573,8 @@ cbind(rate = rownames(players[russian,]), name = as.character(players_info$short
     column_spec(2, color = "blue", bold = T, link = players_info$player_url[russian])
 ```
 
+Видим множество разумных совпадений.
+
 ## Про выбор расстояния
 
 ```{r}
@@ -414,7 +601,6 @@ plot(players_hclust, labels = labs_som, cex = 0.4, main = "Dendrogram (Complete 
 ```
 
 ```{r}
-library(easyr)
 classes_hclust <- cutree(players_hclust, k = 3)
 classes_hclust <- as.factor(classes_hclust)
 levels(classes_hclust) <- c("Attack", "Midfielder", "Defence")
@@ -434,7 +620,7 @@ fviz_pca_biplot(res,
 
 ### Качество
 
-Здесь опять же надо сделать замечание, что кластеры мы делали с помощью другого функционала (минимизировали корреляцию между индивидами), поэтому то, что приведено дальше — не совсем верно. 
+Здесь опять же надо сделать замечание, что кластеры мы делали с помощью другого функционала (минимизировали корреляцию между индивидами), поэтому то, что приведено дальше — не совсем верно (но для сравнения с другими методами допустимо). 
 
 ```{r}
 # Subtract each value from the grand mean and get the number of observations in each cluster.
@@ -453,7 +639,6 @@ BSS <- sum(colSums((gmeans - means)^2) * nrows)
 
 BSS/TSS
 ```
-
 
 ### Мир
 
@@ -517,7 +702,6 @@ abline(h = 55, lty = 2)
 Возьмём $\varepsilon = 55$.
 
 ```{r}
-library(dbscan)
 players_dbscan <- dbscan(players, eps = 60, minPts = 3)
 ```
 
@@ -537,7 +721,6 @@ abline(h = 0.08, lty = 2)
 ```
 
 ```{r}
-library(dbscan)
 players_dbscan <- dbscan(players_dist, eps = 0.05, minPts = 5)
 classes_dbscan <- players_dbscan$cluster
 ```
@@ -562,45 +745,6 @@ cbind(rate = rownames(players[russian,]), name = as.character(players_info$short
     column_spec(2, color = "blue", bold = T, link = players_info$player_url[russian])
 ```
 
-
-# (*) Россия — Кипр
-```{r}
-cyprus <- (players_info$nationality == "Cyprus")
-f1 <- which(cyprus)
-f2 <- which(russian)
-factorr <- rep("", num_players)
-factorr[f1] <- "Cyprus"
-factorr[f2] <- "Russia"
-factorr <- as.factor(factorr)
-
-fviz_pca_biplot(res,
-                label = "ind",
-                col.ind = factorr,
-                legend.title = "Players from Russia and Cyprus",
-                select.ind = list(name = rownames(players_info[russian | cyprus,]))
-                )
-```
-
-# (**) Россия — Хорватия
-```{r}
-cyprus <- (players_info$nationality == "Croatia")
-f1 <- which(cyprus)
-f2 <- which(russian)
-factorr <- rep("", num_players)
-factorr[f1] <- "Cyprus"
-factorr[f2] <- "Russia"
-factorr <- as.factor(factorr)
-
-fviz_pca_biplot(res,
-                label = "ind",
-                col.ind = factorr,
-                legend.title = "Players from Russia and Cyprus",
-                select.ind = list(name = rownames(players_info[russian | cyprus,]))
-                )
-```
-
-
-## TODO:  Silhouettes
 
 
 
