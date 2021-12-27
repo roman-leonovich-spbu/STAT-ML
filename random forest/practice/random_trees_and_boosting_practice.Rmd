@@ -1,0 +1,674 @@
+---
+title: "Решающие деревья. Random Forest. Boosting."
+author: "Арсланов Н.А."
+date: '23 12 2021 '
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(MASS)
+library(ISLR)
+library(gbm)
+library(tree)
+library(caTools)
+library(randomForest)
+```
+
+
+### Исходные данные 
+
+Ниже представлен набор данных под названием "Flats98", который содержит информацию о факторах, определяющих стоимость квартир в Москве. Он включает в себя 10 признаков и 3214 наблюдений.
+
+```{r}
+flats <- read.csv(file = "flats98.csv", header = TRUE, as.is = FALSE)
+head(flats)
+```
+
+Описание признаков:
+
+ - TOTSP - площадь квартиры, кв.м.
+ - price - цена, тыс.долл.
+ - ROOMS - число комнат
+ - LIVSP - жилая площадь, кв.м.
+ - KITSP - площадь кухни, кв.м.
+ - DIST - расстояние от Центра, км.
+ - METRDIST - расстояние до ближайшей станции метро, мин.
+ - WALK - 1, если до квартиры можно пешком дойти до метро, и 0 в противном случае
+ - BRICK - 1, если дом кирпичный, и 0 в противном случае
+ - TEL - 1, если есть телефон, и 0 в противном случае
+ - BAL - 1, если есть балкон, и 0 в противном случае
+ - FLOOR - 1, если не крайний этаж, и 0 в противном случае
+
+Преобразуем исходные данные. Для начала исключим индивидов, которые содержат пропуски в данных.
+
+```{r}
+flats <- na.omit(flats)
+```
+
+Далее превратим признаки rooms, walk, brick, tel, bal и floor в факторы.
+
+```{r}
+flats.orig = flats
+catVars = c("rooms","walk","brick","tel","bal","floor")
+flats[catVars] = lapply(flats[catVars], as.factor)
+```
+
+Затем приведем описательную статистику.
+
+```{r}
+summary(flats)
+```
+
+Наконец, построим график pairs, используя brick в качестве категоризующего признака.
+
+```{r}
+pairs(~ dist + kitsp + livsp + metrdist + price + totsp, data = flats, col = flats$brick, pch = 10, oma=c(3,3,3,15))
+par(xpd = TRUE)
+legend("bottomright", title = "is brick", fill = unique(flats$brick), legend = c(levels(flats$brick)))
+```
+
+По графикам видно, что существуют зависимости между признаками livsp и totsp, kitsp и totsp, price и totsp, price и livsp. Действительно, ведь чем больше общая площадь квартиры, то тем больше будет жилая площадь и площадь кухни. Помимо этого, чем больше площадь, то тем больше цена. Также заметим, что данные в целом можно разделить по признаку brick на две группы.
+
+Прологарифмируем признаки price, totsp и livsp.
+
+```{r}
+flats <- transform(flats, livsp=log(livsp), totsp=log(totsp), price = log(price))
+```
+
+Еще раз построим график pairs.
+
+```{r}
+pairs(~ dist + kitsp + livsp + metrdist + price + totsp, data = flats, col = flats$brick, pch = 10, oma=c(3,3,3,15))
+par(xpd = TRUE)
+legend("bottomright", title = "is brick", fill = unique(flats$brick), legend = c(levels(flats$brick)))
+```
+
+### Classification trees
+
+Разделим исходных набор данных на обучающий и тестовый набор в соотношении 80% на 20%.
+
+```{r}
+set.seed(1)
+sample <- sample.split(flats, SplitRatio = 0.8) 
+flats.train <- subset(flats, sample == TRUE)
+flats.test <- subset(flats, sample == FALSE)
+```
+
+Построим классификационное дерево на обучающем наборе данных. Будем прогнозировать квартиры по признаку brick, используя все остальные переменные. Ниже приведены некоторые сводные статистические данные для дерева классификации, которое было построено на обучающем наборе данных.
+
+```{r}
+tree.flats <- tree(brick ~ ., data = flats.train)
+summary(tree.flats)
+```
+
+Для построения дерева были взяты признаки price, kitsp и dist. Количество терминальных узлов получилось равным $6$. Для деревьев классификации отклонение задается формулой $$-2\sum_{m} \sum_{k} n_{mk} \log{\hat{p}_{mk}},$$
+где  $n_{mk}$ - число наблюдений в m-м терминальном узле, принадлежащих  k-му классу, $\hat{p}_{mk}$- доля наблюдений в m-м классе, принадлежащих k-му классу. Остаточное среднее отклонение, которое представляет собой отклонение, деленное на разницу между числом наблюдений и количеством терминальных узлов, составляет $1.008$. Коэффициент ошибки классификации получился равным $0.2354$.
+
+Теперь приведем информацию о каждом полученном узле. 
+
+```{r}
+tree.flats
+```
+
+Здесь можно увидеть названия всех узлов, условия для разделения, количество наблюдений, для которых выполняется то или иное условие, отклонения по ветке, прогнозы по ветке, доли наблюдений в каждой ветке, конечные узлы. 
+
+Графически дерево можно представить следующим образом:
+
+```{r}
+plot(tree.flats, type = "uniform")
+text(tree.flats,pretty=0)
+```
+
+Можно заметить, что наиболее важным классификационным признаком является price, который на ранних этапах разделения хорошо различает квартиры по признаку brick. После него идут признаки kitsp и dist.
+
+Теперь посмотрим, насколько хорошо работает классификатор. Для этого построим матрицу несоответствия для обучающего набора данных, затем для тестового набора и проанализируем полученные результаты.
+
+Начнем с матрицы несоответствия для тренировочного набора данных.
+
+```{r}
+tree.pred=predict(tree.flats,flats.train,type="class")
+cmClassTree = table(factor(tree.pred), flats.train$brick)
+cmClassTree
+```
+
+Найдем вероятность правильной классификации.
+
+```{r}
+mean(flats.train$brick == tree.pred)
+```
+
+Также определим вероятность попадания в нужный класс.
+
+```{r}
+diag(prop.table(cmClassTree, 2))
+```
+
+Можно заметить, что дерево на тренировочном наборе данных смогло правильно классифицировать квартиры, находящиеся не в кирпичных домах, с вероятностью примерно $88.94$%, а квартиры, которые, наоборот, находятся в кирпичных домах, с вероятностью $54.64$%. Общая вероятность правильной классификации составляет $76.45$%.
+
+Теперь построим матрицу несоответствия для тестового набора данных.
+
+```{r}
+tree.pred=predict(tree.flats,flats.test,type="class")
+cmClassTree = table(factor(tree.pred), flats.test$brick)
+cmClassTree
+```
+
+Найдем вероятность правильной классификации.
+
+```{r}
+mean(flats.test$brick == tree.pred)
+```
+
+Также определим вероятность попадания в нужный класс.
+
+```{r}
+diag(prop.table(cmClassTree, 2))
+```
+
+Заметим, что дерево на тестовом наборе данных смогло правильно классифицировать квартиры, находящиеся не в кирпичных домах, с вероятностью примерно $89.93$%, а квартиры, которые, наоборот, находятся в кирпичных домах, с вероятностью $51.33$%. Общая вероятность правильной классификации составляет $76.4$%.
+
+Теперь попробуем обрезать дерево для улучшения результатов. Для этого сначала воспользуемся кросс-валидацией для определения оптимального размера дерева. График размера дерева и ошибок классификации представлен ниже.
+
+```{r}
+set.seed(1)
+cv.flats =cv.tree(tree.flats, FUN=prune.misclass, K = 10)
+plot(cv.flats$size,cv.flats$dev,type="b", xlab = "Tree Size (# of Terminal Nodes)",
+     ylab="CV Classification Error")
+``` 
+
+Можно заметить, что величина ошибки классификации принимает наименьшее значение тогда, когда количество терминальных узлов равно 3-м и более. В рассмотренном выше дереве классификации использовалось 6 терминальных узлов. Посмотрим, какие результаты получатся при 3 терминальных узлах.
+
+```{r}
+prune.flats=prune.tree(tree.flats,best=3)
+summary(prune.flats)
+```
+
+Информация об узлах в "обрезанном" дереве.
+
+```{r}
+prune.flats
+```
+
+График "обрезанного" дерева.
+
+```{r}
+plot(prune.flats, type = "uniform")
+text(prune.flats,pretty=0)
+```
+
+По дереву видно, что наиболее важными признаками для классификации являются price и dist.
+
+Построим матрицу несоответствия по тренировочному набору данных.
+
+```{r}
+tree.pred=predict(prune.flats,flats.train,type="class")
+cmClassTree = table(factor(tree.pred), flats.train$brick)
+cmClassTree
+```
+
+Найдем вероятность правильной классификации.
+
+```{r}
+mean(flats.train$brick == tree.pred)
+```
+
+Также определим вероятность попадания в нужный класс.
+
+```{r}
+diag(prop.table(cmClassTree, 2))
+```
+
+Заметим, что "обрезанное" дерево на тренировочном наборе данных смогло правильно классифицировать квартиры, находящиеся не в кирпичных домах, с вероятностью примерно $88.94$%, а квартиры, которые, наоборот, находятся в кирпичных домах, с вероятностью $54.64$%. Общая вероятность правильной классификации составляет $76.45$%.
+
+Построим матрицу несоответствия по тестовым данным.
+
+```{r}
+tree.pred=predict(prune.flats,flats.test,type="class")
+cmClassTree = table(factor(tree.pred), flats.test$brick)
+cmClassTree
+```
+
+Найдем вероятность правильной классификации.
+
+```{r}
+mean(flats.test$brick == tree.pred)
+```
+
+Также определим вероятность попадания в нужный класс.
+
+```{r}
+diag(prop.table(cmClassTree, 2))
+```
+
+Заметим, что "обрезанное" дерево на тестовом наборе данных смогло правильно классифицировать квартиры, находящиеся не в кирпичных домах, с вероятностью примерно $89.93$%, а квартиры, которые, наоборот, находятся в кирпичных домах, с вероятностью $51.33$%. Общая вероятность правильной классификации составляет $76.4$%.
+
+Таким образом, мы уменьшили число используемых терминальных узлов в дереве без потери точности классификации.
+
+### Random Forests for classification
+
+Теперь попробуем классифицировать исходных набор данных, используя случайный лес и бэггинг - частный случай случайного леса, при котором m = p, где m - используемое число признаков, а p - общее число предикторов. В каждом случае обучим модель на тренировочной выборке, затем сделаем прогнозы и построим матрицы несоответствия.
+
+Начнем с бэггинга.
+
+Для начала определим оптимальное количество деревьев в случайном лесу.
+
+```{r}
+set.seed(1)
+
+err_train <- vector()
+err_test <- vector()
+n_estimators <- vector()
+
+min_estimators = 1
+max_estimators = 100
+
+for (n in min_estimators:max_estimators){
+        rf_clf <- randomForest(brick ~ ., data = flats.train, ntree=n, mtry=11, importance =TRUE)
+        yhat.flats.train<-predict(rf_clf, flats.train,type="class")
+        yhat.flats.test<-predict(rf_clf, flats.test,type="class")
+        err_train <- c(err_train,(1 - mean(flats.train$brick == yhat.flats.train)))
+        err_test <- c(err_test,(1 - mean(flats.test$brick == yhat.flats.test)))
+        n_estimators <- c(n_estimators, n)
+}
+errors <- data.frame(n_estimators, err_train, err_test)
+```
+
+Построим график зависимости величины ошибки от количества используемых деревьев в модели. 
+
+```{r}
+plot(n_estimators, err_train, type="l",  ylim = c(0,0.3), xlab = "n_estimators", ylab="error rate", col="red")
+lines(n_estimators, err_test, type="l", col="blue")
+```
+
+Оптимальным числом деревьев можно считать 16, поскольку при большем количестве ошибка практически не изменяется на тренировочном наборе данных.
+
+```{r}
+set.seed(1)
+rf.flats<-randomForest(brick ~ ., data = flats.train, ntree=16, mtry=11, importance =TRUE)
+rf.flats
+```
+
+Матрица несоответствия на тестовом наборе данных.
+
+```{r}
+yhat.flats<-predict(rf.flats, flats.test,type="class")
+cmClassRandomForest = table(factor(yhat.flats), flats.test$brick)
+cmClassRandomForest
+```
+
+Найдем вероятность правильной классификации.
+
+```{r}
+mean(flats.test$brick == yhat.flats)
+```
+
+Также определим вероятность попадания в нужный класс.
+
+```{r}
+diag(prop.table(cmClassRandomForest, 2))
+```
+
+Заметим, что бэггинг на тестовом наборе данных смог правильно классифицировать квартиры, находящиеся не в кирпичных домах, с вероятностью примерно $88.5$%, а квартиры, которые, наоборот, находятся в кирпичных домах, с вероятностью $71.86$%. Общая вероятность правильной классификации составляет $82.66$%.
+
+Теперь перейдем к случайному лесу. Отметим, что при построении случайного леса деревьев классификации по умолчанию используется $\sqrt{p}$ признаков. 
+
+Определим оптимальное число деревьев в случайном лесу.
+
+```{r}
+set.seed(1)
+
+err_train <- vector()
+err_test <- vector()
+n_estimators <- vector()
+
+min_estimators = 1
+max_estimators = 100
+
+for (n in min_estimators:max_estimators){
+        rf_clf <- randomForest(brick ~ ., data = flats.train, ntree=n, importance =TRUE)
+        yhat.flats.train<-predict(rf_clf, flats.train,type="class")
+        yhat.flats.test<-predict(rf_clf, flats.test,type="class")
+        err_train <- c(err_train,(1 - mean(flats.train$brick == yhat.flats.train)))
+        err_test <- c(err_test,(1 - mean(flats.test$brick == yhat.flats.test)))
+        n_estimators <- c(n_estimators, n)
+}
+errors <- data.frame(n_estimators, err_train, err_test)
+```
+
+Построим график зависимости величины ошибки от количества используемых деревьев в модели. 
+
+```{r}
+plot(n_estimators, err_train, type="l",  ylim = c(0,0.3), xlab = "n_estimators", ylab="error rate", col="red")
+lines(n_estimators, err_test, type="l", col="blue")
+```
+
+Оптимальным числом деревьев можно считать 20, поскольку при большем количестве ошибка практически не изменяется на тренировочном наборе данных. 
+
+```{r}
+set.seed(1)
+rf.flats<-randomForest(brick ~ ., data = flats.train, ntree=20, importance =TRUE)
+rf.flats
+```
+
+Матрица несоответствия на тестовом наборе данных.
+
+```{r}
+yhat.flats<-predict(rf.flats, flats.test,type="class")
+cmClassRandomForest = table(factor(yhat.flats), flats.test$brick)
+cmClassRandomForest
+```
+
+Найдем вероятность правильной классификации.
+
+```{r}
+mean(flats.test$brick == yhat.flats)
+```
+
+Также определим вероятность попадания в нужный класс.
+
+```{r}
+diag(prop.table(cmClassRandomForest, 2))
+```
+
+Заметим, что соучайный лес на тестовом наборе данных смог правильно классифицировать квартиры, находящиеся не в кирпичных домах, с вероятностью примерно $88.5$%, а квартиры, которые, наоборот, находятся в кирпичных домах, с вероятностью $69.58$%. Общая вероятность правильной классификации составляет $81.86$%.
+
+Наконец, определим важность каждого признака.
+
+```{r}
+importance(rf.flats)
+```
+
+ - MeanDecreaseAccuracy- cреднее снижение точности (коэффициент ошибок для классификации).
+
+ - MeanDecreaseGini- cреднее падение индекса Джини. При каждом ветвлении на дереве падает индекс Джини. Для каждой переменной можно посчитать суммарное падение индекса Джини, вызванное ветвлениями на базе этой переменной. Посчитав среднее падение Джини по всем деревьям получим меру важности.
+
+### Regression Trees
+
+Перейдем к построению регрессионных деревьев. Будем прогнозировать price, используя все остальные переменные. Ниже приведены некоторые сводные статистические данные для регрессионного дерева, которое было построено на обучающем наборе данных.
+
+```{r}
+reg.tree.flats <- tree(price ~ ., data = flats.train)
+summary(reg.tree.flats)
+```
+
+Посмотрим на структуру узлов полученного регрессионного дерева.
+
+```{r}
+reg.tree.flats
+```
+
+Построим регрессионное дерево.
+
+```{r}
+plot(reg.tree.flats)
+text(reg.tree.flats)
+```
+
+Теперь попробуем ""обрезать дерево" для улучшения результатов. Для этого сначала определим оптимальный размер дерева. Ниже представлен соответствующий график.
+
+```{r}
+set.seed(1)
+cv.reg.flats =cv.tree(reg.tree.flats, K = 10)
+plot(cv.reg.flats$size,cv.reg.flats$dev,type="b", xlab = "Tree Size (# of Terminal Nodes)",
+     ylab="Total residual deviance")
+```
+
+Можно заметить, что наименьшая величина Total residual deviance достигается тогда, когда количество терминальных узлов равно 8. В рассмотренном выше регрессионном дереве как раз оно и использовалось. Поэтому можно не "обрезать" дерево.
+
+Теперь сделаем прогнозы на тестовом наборе данных и рассчитаем MSE.
+
+```{r}
+reg.tree.pred=predict(reg.tree.flats,flats.test)
+plot(reg.tree.pred, flats.test$price, xlab="Predicted", ylab="Fact") 
+abline(0,1)
+```
+
+MSE для тестового набора данных.
+
+```{r}
+MSE <- mean((reg.tree.pred-flats.test$price)^2)
+MSE
+```
+
+Корень из MSE.
+
+```{r}
+MSEsqrt <- sqrt(MSE)
+MSEsqrt
+```
+
+Таким образом, MSE для тестового набора, получился равным $0.04240807$. Квадратный корень из MSE равен $0.2059322$.
+
+
+### Random Forests for regression
+
+Теперь попробуем построить регрессию, используя случайный лес и бэггинг. Для каждого из вариантов обучим модель на тренировочной выборке и сделаем прогнозы.
+
+Начнем с бэггинга.
+
+Для начала определим оптимальное число деревьев.
+
+```{r}
+set.seed(1)
+
+mse_train <- vector()
+mse_test <- vector()
+n_estimators <- vector()
+
+min_estimators = 1
+max_estimators = 100
+
+for (n in min_estimators:max_estimators){
+        rf_reg <- randomForest(price ~ ., data = flats.train, ntree=n, mtry=11, importance =TRUE)
+        yhat.flats.train<-predict(rf_reg, flats.train)
+        yhat.flats.test<-predict(rf_reg, flats.test)
+        mse_train <- c(mse_train,mean((yhat.flats.train-flats.train$price)^2))
+        mse_test <- c(mse_test,mean((yhat.flats.test-flats.test$price)^2))
+        n_estimators <- c(n_estimators, n)
+}
+errors_reg <- data.frame(n_estimators, mse_train, mse_test)
+```
+
+Построим график зависимости MSE от количества используемых деревьев в модели. 
+
+```{r}
+plot(n_estimators, mse_train, type="l",  ylim = c(0,0.1), xlab = "n_estimators", ylab="MSE", col="red")
+lines(n_estimators, mse_test, type="l", col="blue")
+```
+
+Оптимальным числом деревьев можно считать 9, поскольку при большем количестве ошибка практически не изменяется на тренировочном наборе данных. 
+
+```{r}
+set.seed(1)
+reg.rf.flats<-randomForest(price ~ ., data = flats.train, ntree=9, mtry=11, importance =TRUE)
+reg.rf.flats
+```
+
+```{r}
+reg.rf.pred=predict(reg.rf.flats,flats.test)
+plot(reg.rf.pred, flats.test$price, xlab="Predicted", ylab="Fact") 
+abline(0,1)
+```
+
+MSE для тестового набора данных.
+
+```{r}
+MSE <- mean((reg.rf.pred-flats.test$price)^2)
+MSE
+```
+
+Корень из MSE.
+
+```{r}
+MSEsqrt <- sqrt(MSE)
+MSEsqrt
+```
+
+Таким образом, MSE для тестового набора, получился равным $0.02548316$. Квадратный корень из MSE равен $0.1596345$.
+
+Наконец, определим важность каждого признака.
+
+```{r}
+importance(reg.rf.flats)
+```
+
+ - %IncMSE- среднее снижении точности прогнозов (оценивается MSE предсказаний). 
+
+ - IncNodePurity - мера среднего увеличения “чистоты узла” дерева (node purity) в результате разбиения данных по соответствующей переменной. В случае деревьев регрессии чистота узлов измеряется RSS обучающего набора.
+
+Графики этих мер важности:
+
+```{r}
+varImpPlot (reg.rf.flats)
+```
+
+Теперь построим случайный лес. Отметим, что по умолчанию здесь используется $\frac{p}{3}$ переменных при построении случайного леса деревьев регрессии.
+
+Для начала определим оптимальное число деревьев.
+
+```{r}
+set.seed(1)
+
+mse_train <- vector()
+mse_test <- vector()
+n_estimators <- vector()
+
+min_estimators = 1
+max_estimators = 100
+
+for (n in min_estimators:max_estimators){
+        rf_reg <- randomForest(price ~ ., data = flats.train, ntree=n, importance =TRUE)
+        yhat.flats.train<-predict(rf_reg, flats.train)
+        yhat.flats.test<-predict(rf_reg, flats.test)
+        mse_train <- c(mse_train,mean((yhat.flats.train-flats.train$price)^2))
+        mse_test <- c(mse_test,mean((yhat.flats.test-flats.test$price)^2))
+        n_estimators <- c(n_estimators, n)
+}
+errors_reg <- data.frame(n_estimators, mse_train, mse_test)
+```
+
+Построим график зависимости MSE от количества используемых деревьев в модели. 
+
+```{r}
+plot(n_estimators, mse_train, type="l",  ylim = c(0,0.1), xlab = "n_estimators", ylab="MSE", col="red")
+lines(n_estimators, mse_test, type="l", col="blue")
+```
+
+Оптимальным числом деревьев можно считать 7, поскольку при большем количестве ошибка практически не изменяется на тренировочном наборе данных. 
+
+```{r}
+set.seed(1)
+reg.rf.flats<-randomForest(price ~ ., data = flats.train, ntree=7, importance =TRUE)
+reg.rf.flats
+```
+
+```{r}
+reg.rf.pred=predict(reg.rf.flats,flats.test)
+plot(reg.rf.pred, flats.test$price, xlab="Predicted", ylab="Fact") 
+abline(0,1)
+```
+
+MSE для тестового набора данных.
+
+```{r}
+MSE <- mean((reg.rf.pred-flats.test$price)^2)
+MSE
+```
+
+Корень из MSE.
+
+```{r}
+MSEsqrt <- sqrt(MSE)
+MSEsqrt
+```
+
+Таким образом, MSE для тестового набора, получился равным $0.02869584$. Квадратный корень из MSE равен $0.1693985$.
+
+Наконец, определим важность каждого признака.
+
+```{r}
+importance(reg.rf.flats)
+```
+
+Графики этих мер важности:
+
+```{r}
+varImpPlot (reg.rf.flats)
+```
+
+### Boosting
+
+Построим boosting модель на обучающем наборе данных, где признак "brick" - зависимая переменная, а все остальное - регрессоры.
+
+```{r}
+flats.train.logical <- flats.train
+flats.test.logical <- flats.test
+```
+
+Определим оптимальное число деревьев.
+
+```{r message=FALSE, warning=FALSE}
+set.seed(1)
+
+err_train <- vector()
+err_test <- vector()
+n_estimators <- vector()
+
+min_estimators = 1
+max_estimators = 500
+
+for (n in min_estimators:max_estimators){
+        boost.flats <- gbm(brick ~ ., data = flats.train.logical, distribution = "multinomial", n.trees = n, shrinkage = 0.01)
+        yhat.flats.train<-predict.gbm(boost.flats, flats.train.logical)
+        labels_train = colnames( yhat.flats.train)[apply( yhat.flats.train, 1, which.max)]
+        labels_train = as.factor(labels_train)
+        err_train <- c(err_train,(1 - mean(flats.train.logical$brick == labels_train)))
+        n_estimators <- c(n_estimators, n)
+}
+errors <- data.frame(n_estimators, err_train)
+```
+
+Построим график зависимости величины ошибки от количества используемых деревьев в модели. 
+
+```{r}
+plot(n_estimators, err_train, type="l",  ylim = c(0,0.3), xlab = "n_estimators", ylab="error rate", col="red")
+```
+
+Оптимальным числом деревьев можно считать 360, поскольку при большем количестве ошибка практически не изменяется на тренировочном наборе данных. 
+
+```{r message=FALSE, warning=FALSE}
+set.seed(1)
+boost.flats <- gbm(brick ~ ., data = flats.train.logical, distribution = "multinomial", n.trees = 360, shrinkage = 0.01)
+summary(boost.flats)
+```
+
+В результате получается, что самыми значимыми являются признаки price, dist, kitsp и livsp.
+
+Постоим матрицу несоответствия на тестовом наборе данных.
+
+```{r}
+boost.flats.test <- predict.gbm(boost.flats, newdata = flats.test.logical)
+labels <- flats.test.logical[,"brick"]
+labels = colnames(boost.flats.test)[apply(boost.flats.test, 1, which.max)]
+result = data.frame(flats.test.logical$brick, labels)
+cmClassboost = table(as.factor(labels), flats.test.logical$brick)
+cmClassboost
+```
+
+Вероятность правильной классификации.
+
+```{r}
+mean(flats.test.logical$brick == as.factor(labels))
+```
+
+Вероятность попадания в нужный класс.
+
+```{r}
+diag(prop.table(cmClassboost, 2))
+```
+
+Таким образом, boosting модель на тестовом наборе данных смога правильно классифицировать квартиры, находящиеся не в кирпичных домах, с вероятностью примерно $90.96$%, а квартиры, которые, наоборот, находятся в кирпичных домах, с вероятностью $55.51$%. Общая вероятность правильной классификации составляет $78.53$%.
+
+
+
