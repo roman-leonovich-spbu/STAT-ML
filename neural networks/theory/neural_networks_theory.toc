@@ -1,0 +1,13 @@
+\babel@toc {russian}{}
+\contentsline {section}{\numberline {1}NN}{2}{}%
+\contentsline {section}{\numberline {2}CNN}{4}{}%
+\contentsline {subsection}{\numberline {2.1}Особенности построения нейронных сетей для изображений (Convolutional Neural Networks)}{4}{}%
+\contentsline {subsection}{\numberline {2.2}Свертка}{4}{}%
+\contentsline {subsection}{\numberline {2.3}Карта признаков (feature map / activation map)}{5}{}%
+\contentsline {subsection}{\numberline {2.4}Ядро фильтра}{5}{}%
+\contentsline {subsection}{\numberline {2.5}Пример паттерна}{6}{}%
+\contentsline {subsection}{\numberline {2.6}Пример изображения}{7}{}%
+\contentsline {subsection}{\numberline {2.7}Полноцветное изображение}{8}{}%
+\contentsline {subsection}{\numberline {2.8}Функции активации}{9}{}%
+\contentsline {subsection}{\numberline {2.9}MaxPooling}{9}{}%
+\contentsline {subsection}{\numberline {2.10}Итоговая архитекрутра}{11}{}%
