@@ -1,0 +1,675 @@
+---
+title: "Предсказание цены на автомобили. Семинар по SL и ML: экзамен."
+output:
+    html_document:
+        #folding of code
+        code_folding: show
+        #highliting of the code
+        highlight: tango
+        #theme of the document (see bootswatch.com)
+        #other nice variants:
+        ##“default”, “cerulean”, “journal”, “flatly”, “darkly”,
+        ##“readable”, “spacelab”, “united”, “cosmo”, “lumen”,
+        ##“paper”, “sandstone”, “simplex”, “yeti”
+        theme: readable
+        #table of contents
+        toc: yes
+        #floating table of contents
+        toc_float:
+          #collapsed subsections
+          collapsed: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Введение
+
+Используем три различных метода построения модели
+
+1. Линейная регрессия
+
+2. Random forest
+
+3. Нейронная сеть
+
+и сравним полученные результаты. 
+
+# Описание данных и чистка
+
+Начнём с библиотек.
+
+```{r, verbose=FALSE}
+#install.packages(c("knitr", "kableExtra", "magick",
+#                   "ggplot2", "reshape2", "viridis",
+#                   "stringr", "FactoMineR", "factorextra",
+#                   "kohonen", "mclust", "dbscan", "easyr", "fastDummies"))
+library(knitr) 
+library(kableExtra) #красивые html таблицы
+library(magick)     #работа с картинками
+library(ggplot2)    #графики
+library(reshape2)   #работа с датафреймом
+library(viridis)    #палитра
+library(stringr)    #работа с текстом
+library(FactoMineR) #факторный анализ
+library(factoextra) #факторный анализ
+library(easyr)
+library(fastDummies)
+library(GGally)
+library(randomForest)
+library(tree)
+library(neuralnet)
+```
+
+Данные, которые мы используем, взяты по ссылке отсюда: https://www.kaggle.com/lepchenkov/usedcarscatalog.
+
+Это данные объявлений на продажу автомобилей в Белоруссии в декабре 2019 года. Задачу для себя мы поставим следующим образом: предсказать цену автомобиля на основании его характеристик.
+
+Читаем датасет из csv файла и смотрим на его размерность.
+
+```{r}
+cars <- read.csv("cars.csv") #полный датафрейм
+cbind(before = dim(cars), after_na_rm = dim(cars <- na.omit(cars)))
+```
+
+Как можно видеть, размер у датасета немаленький и вполне достаточный для того, чтобы дать возможность "проявить" себя всем рассматриваемым методам. 
+
+```{r}
+names(cars)
+```
+
+Относительно переменных: по словам автора датасета, переменные `feature_0`-`feature_9` не имеют описания и характеризуют некоторые технические детали. Ввиду неполноты информации, мы вынуждены изъять их из рассмотрения.
+
+```{r}
+cars <- cars[,-(20:29)]
+```
+
+Среди численных переменных видим `odometer_value`, `year_produced`, `engine_capacity`, `price_usd`, `number_of_photos`, `up_counter`, `duration_listed` (7 переменных).
+
+```{r}
+dummy_cands <- c("transmission", "has_warranty", "is_exchangeable", "manufacturer_name", "color", "engine_fuel", "engine_type", "body_type", "state", "drivetrain", "location_region")
+#apply(cars[,dummy_cands], MARGIN = 2, FUN = unique)
+```
+
+Сделаем dummy variables из всего, кроме марки (их многовато).
+
+```{r}
+dummy_cands <- dummy_cands[-which(dummy_cands == "manufacturer_name")]
+cars_dum <- dummy_cols(cars, select_columns = dummy_cands, remove_most_frequent_dummy = TRUE)
+cars_dum <- cars_dum[,!(names(cars_dum) %in% dummy_cands)]
+```
+
+```{r}
+dim(cars_dum)
+names(cars_dum)
+```
+
+Зафиксируем индексы марки, модели, и признаки, которые дублируют остальные и которые не будут использованы в моделировании.
+
+```{r}
+extraneous_vars <- c(1,2,29,34,26,27)
+```
+
+После добавления dummy variables переменных стало больше, но их количество вполне можно считать допустимым для построения модели при текущем размере выборки. 
+
+## Разбиение на тренировочную и тестовую выборку
+
+Возьмём тестовую выборку как $1/5$ от всей выборки.
+
+```{r}
+set.seed(10001)
+N <- 6000
+cars_dum <- cars_dum[sample(1:nrow(cars_dum), N, replace = FALSE),]
+test_id <- sample(1:N, N/5, replace = FALSE)
+train_id <- (1:N)[-test_id]
+```
+
+Длина тренировочной выборки: `r length(train_id)`, 
+Длина тестовой выборки: `r length(test_id)`.
+
+# Линейная регрессия
+
+```{r}
+start_time <- Sys.time()
+lm.car <- lm(price_usd~., data = cars_dum[,-extraneous_vars], subset = train_id)
+end_time <- Sys.time()
+end_time - start_time
+```
+
+```{r}
+summary(lm.car)
+```
+
+```{r}
+lm.car_predict <- predict(lm.car, cars_dum[test_id,-extraneous_vars])
+lm.train_err <- sqrt(mean(lm.car$residuals^2))
+lm.test_err <- sqrt(mean((lm.car_predict - cars_dum$price_usd[test_id])^2))
+cbind((lm.train_err), (lm.test_err))
+```
+
+## С логарифмированием
+
+```{r}
+start_time <- Sys.time()
+lm_log.car <- lm(log(price_usd)~., data = cars_dum[,-extraneous_vars], subset = train_id)
+end_time <- Sys.time()
+end_time - start_time
+```
+
+```{r}
+summary(lm_log.car)
+```
+
+```{r}
+lm_log.car_predict <- predict(lm_log.car, cars_dum[test_id,-extraneous_vars])
+lm_log.train_err <- sqrt(mean((exp(lm_log.car$fitted.values) - cars_dum$price_usd[train_id])^2))
+lm_log.test_err <- sqrt(mean((exp(lm_log.car_predict) - cars_dum$price_usd[test_id])^2))
+cbind((lm_log.train_err), (lm_log.test_err))
+```
+
+Если взглянуть на попарные корреляции, явной проблемы мультиколлинеарности мы не наблюдаем.
+
+```{r}
+ggcorr(cars_dum[train_id,-extraneous_vars])
+```
+
+```{r}
+plot(lm_log.car)
+```
+
+
+## Про метод
+
+1. **Какая постановка задачи, что предполагается, что и почему оптимизируется (функция потерь), как оптимизируется?**
+
+2. **Какие параметры у метода: функция плюс соответствие теор.формул и параметров**
+
+3. **Как подбирали параметры, на основе чего?** 
+
+4. **Как справлялись с overfitting?** 
+
+5. **Какой получили результат на cross-validation?** 
+
+6. **Подтверждаете свое исходное объяснение, почему метод сработал хорошо/плохо**
+
+
+# Random Forest
+
+Параметр `mtry` отвечает за число переменных, которое выбирается из всего набора для построения дерева
+
+`nodesize` это параметр, который отвечает за минимальное число элементов внутри узла. Когда это значение достигается, дерево перестаёт расти.
+
+```{r}
+set.seed(999)
+valid_size <- 1000
+valid_id <- sample(1:length(train_id), valid_size)
+ntrees <- 500
+# start_time <- Sys.time()
+# rf.car <- randomForest(x = data.frame(cars_dum[train_id[-valid_id],-c(7,extraneous_vars)]),
+#                        y = cars_dum$price_usd[train_id[-valid_id]],
+#                        ntree = ntrees,
+#                        mtry = 30, #44 params total, std is p/3
+#                        nodesize = 3,
+#                        importance = TRUE,
+#                        ytest = cars_dum$price_usd[test_id],
+#                        xtest = data.frame(cars_dum[test_id,-c(7,extraneous_vars)]))
+# end_time <- Sys.time()
+# end_time - start_time
+#saveRDS(rf.car, "rf_car.rds")
+rf.car <- readRDS("rf_car.rds")
+```
+
+Построим графики квадратного корня из MSE для различного числа деревьев.
+
+```{r}
+plot(1:ntrees, rf.train_err <- sqrt(rf.car$mse), type="l", xlab = "number of trees", ylab="sqrt(MSE)", col="red", ylim = c(2300, 3400))
+lines(1:ntrees, rf.test_err <- sqrt(rf.car$test$mse), type="l", col="blue")
+legend("topright", legend = c("test","train"), lty = c(1,1), col = c("blue", "red"))
+rf.train_err <- tail(rf.train_err, 1)
+rf.test_err <- tail(rf.test_err, 1)
+```
+
+Некоторая стабилизация наблюдается уже после построения 200 деревьев.
+Видим, что тестовая ошибка не сильно больше, чем тренировочная.
+С увеличением числа деревьев тенденция к overfitting уменьшается.
+
+Посмотрим, где достигается минимум тренировочной ошибки.
+```{r}
+which.min(rf.car$mse)
+```
+
+Разница между результатами невелика:
+```{r}
+sqrt(rf.car$mse[100]) - sqrt(rf.car$mse[which.min(rf.car$mse)])
+```
+
+Ещё одна полезная оценка - псевдо-коэффициент детерминации (ещё одна возможность сравнить с линейной регрессией)
+```{r}
+rf.car$rsq[100]
+```
+
+
+```{r}
+par(mfrow = c(1,2))
+plot(cars_dum$price_usd[train_id[-valid_id]], rf.car$predicted, main = "train", ylim = c(0,40000))
+plot(cars_dum$price_usd[test_id], rf.car$test$predicted, main = "test", ylim = c(0,40000))
+```
+
+Также можем обратить внимание на значимость переменных и чистоту узлов.
+
+```{r}
+varImpPlot(rf.car, cex = 0.6)
+```
+
+
+## Дополнительные эксперименты {.tabset .tabset-pills}
+
+### Число признаков: `mtry`
+
+```{r}
+set.seed(99669)
+ntrees <- 500
+#start_time <- Sys.time()
+mt_s <- rep(seq(5, 40, 5),3)
+# mse_train_mtry <- numeric(length = length(mt_s))
+# mse_valid_mtry <- numeric(length = length(mt_s))
+# mse_valid_curves_mtry <- list(length = length(mt_s))
+# wh_min_mtry <- numeric(length = length(mt_s))
+# for (i in 1:length(mt_s)) {
+# rf.car_mtry <- randomForest(x = data.frame(cars_dum[train_id[-valid_id],-c(7,extraneous_vars)]),
+#                        y = cars_dum$price_usd[train_id[-valid_id]],
+#                        ntree = ntrees,
+#                        mtry = mt_s[i], #44 params total, std is p/3
+#                        nodesize = 5,
+#                        importance = TRUE,
+#                        ytest = cars_dum$price_usd[train_id[valid_id]],
+#                        xtest = data.frame(cars_dum[train_id[valid_id],-c(7,extraneous_vars)]))
+# mse_train_mtry[i] <- sqrt(tail(rf.car_mtry$mse, 1))
+# mse_valid_mtry[i] <- sqrt(tail(rf.car_mtry$test$mse, 1))
+# mse_valid_curves_mtry[[i]] <- sqrt(rf.car_mtry$test$mse)
+# wh_min_mtry[i] <- which.min(abs(rf.car_mtry$mse - median(rf.car_mtry$mse)))
+# }
+# end_time <- Sys.time()
+# end_time - start_time
+
+# saveRDS(mse_train_mtry, "mse_train_mtry.rds")
+# saveRDS(mse_valid_mtry, "mse_valid_mtry.rds")
+# saveRDS(mse_valid_curves_mtry, "mse_valid_curves_mtry.rds")
+# saveRDS(wh_min_mtry, "wh_min_mtry.rds")
+# 
+mse_train_mtry <- readRDS("mse_train_mtry.rds")
+mse_valid_mtry <- readRDS("mse_valid_mtry.rds")
+mse_valid_curves_mtry <- readRDS("mse_valid_curves_mtry.rds")
+wh_min_mtry <- readRDS("wh_min_mtry.rds")
+```
+
+```{r}
+plot(mt_s, mse_train_mtry, col = "red", ylim = c(2000, 2800), main = "mtry parameter tuning", pch = 4, xlab = "mtry value", ylab = "sqrt(MSE)")
+points(mt_s, mse_valid_mtry, col = "blue", pch = 4)
+legend("topright", legend = c("validation","train"), pch = 4, col = c("red", "blue"))
+```
+
+```{r}
+plot(1:ntrees, mse_valid_curves_mtry[[1]], "l", ylim = c(2000, 3000), col = "red", main = "Stabilization of the MSE curves")
+lines(1:ntrees, mse_valid_curves_mtry[[2]], col = "orange")
+lines(1:ntrees, mse_valid_curves_mtry[[3]], col = "yellow")
+lines(1:ntrees, mse_valid_curves_mtry[[4]], col = "green")
+lines(1:ntrees, mse_valid_curves_mtry[[5]], col = "blue")
+lines(1:ntrees, mse_valid_curves_mtry[[6]], col = "purple")
+lines(1:ntrees, mse_valid_curves_mtry[[7]], col = "brown")
+lines(1:ntrees, mse_valid_curves_mtry[[8]], col = "black")
+legend("topright", legend = mt_s[1:8], title = "mtry value", lty = rep(1,8), col = c("red", "orange", "yellow", "green", "blue", "purple", "brown", "black"))
+```
+
+### Глубина дерева: `nodesize`
+
+```{r}
+set.seed(99669)
+ntrees <- 500
+#start_time <- Sys.time()
+node_s <- rep(c(1,3,5,10,20,35,50),3)
+# mse_train_node <- numeric(length = length(node_s))
+# mse_valid_node <- numeric(length = length(node_s))
+# wh_min_node <- numeric(length = length(node_s))
+# for (i in 1:length(node_s)) {
+# rf.car_node <- randomForest(x = data.frame(cars_dum[train_id[-valid_id],-c(7,extraneous_vars)]),
+#                        y = cars_dum$price_usd[train_id[-valid_id]],
+#                        ntree = ntrees,
+#                        mtry = 30, #44 params total, std is p/3
+#                        nodesize = node_s[i],
+#                        importance = TRUE,
+#                        ytest = cars_dum$price_usd[train_id[valid_id]],
+#                        xtest = data.frame(cars_dum[train_id[valid_id],-c(7,extraneous_vars)]))
+# mse_train_node[i] <- sqrt(tail(rf.car_node$mse, 1))
+# mse_valid_node[i] <- sqrt(tail(rf.car_node$test$mse, 1))
+# wh_min_node[i] <- which.min(abs(rf.car_node$mse - median(rf.car_node$mse)))
+# }
+# end_time <- Sys.time()
+# end_time - start_time
+
+# saveRDS(mse_train_node, "mse_train_node.rds")
+# saveRDS(mse_valid_node, "mse_valid_node.rds")
+# saveRDS(wh_min_node, "wh_min_node.rds")
+# 
+mse_train_node <- readRDS("mse_train_node.rds")
+mse_valid_node <- readRDS("mse_valid_node.rds")
+wh_min_node <- readRDS("wh_min_node.rds")
+```
+
+```{r}
+plot(node_s, mse_train_node, col = "red", ylim = c(2000, 2600), main = "nodesize parameter tuning", pch = 4, xlab = "nodesize value", ylab = "sqrt(MSE)")
+points(node_s, mse_valid_node, col = "blue", pch = 4)
+legend("topright", legend = c("validation","train"), pch = 4, col = c("red", "blue"))
+```
+
+## Про метод
+
+1. **Какая постановка задачи, что предполагается, что и почему оптимизируется (функция потерь), как оптимизируется?**
+
+Задача регрессии, оптимизируем квадратичную функцию потерь.
+Основа метода: применение решающих деревьев на бутстреп выборках и сокращённом числе признаков.
+
+
+2. **Какие параметры у метода: функция плюс соответствие теор.формул и параметров**
+
+Главные параметры: `mtry` и `nodesize`.
+
+3. **Как подбирали параметры, на основе чего?** 
+
+Начинали с рекомендуемого значения, затем рассмотрели другие варианты и выбрали наилучшие с помощью валидационной выборки.
+
+4. **Как справлялись с overfitting?** 
+
+Смотрим на стабилизацию, рассчитываем на усреднение.
+Обычно для этого контролируется `nodesize`, но у нас такой проблемы не было.
+
+5. **Какой получили результат на cross-validation?** 
+
+Можно посмотреть выше.
+
+6. **Подтверждаете свое исходное объяснение, почему метод сработал хорошо/плохо**
+
+Хорошо сработал averaging по деревьям.
+
+# Нейронная сеть
+
+```{r}
+cars_dum$engine_has_gas <- as.integer(as.logical(cars_dum$engine_has_gas))
+maxs <- as.numeric(apply(cars_dum[,-extraneous_vars], 2, max))
+mins <- as.numeric(apply(cars_dum[,-extraneous_vars], 2, min))
+means <- as.numeric(apply(cars_dum[,-extraneous_vars], 2, mean))
+scaled_cars <- as.data.frame(scale(as.matrix(cars_dum[,-extraneous_vars]), center = mins, 
+                              scale = maxs - mins))
+names(scaled_cars) <- paste("n",1:ncol(scaled_cars), sep = "")
+scaled_cars_train <- as.data.frame(scaled_cars[train_id[-valid_id],])
+scaled_cars_valid <- as.data.frame(scaled_cars[train_id[valid_id],])
+scaled_cars_test <- as.data.frame(scaled_cars[test_id,])
+```
+
+## Один скрытый слой
+
+```{r}
+# set.seed(4537)
+# 
+# start_time <- Sys.time()
+# 
+# #works but slow, hmmm
+ relu = function(x) {
+     (x + abs(x))/2
+     }
+ epochs <- 20
+# nn1.car <- neuralnet(n5 ~ ., 
+#                 data = scaled_cars_train,
+#                 algorithm = "rprop+",
+#                 hidden = 10, 
+#                 stepmax = 1e+05,
+#                 linear.output = TRUE,
+#                 act.fct = "logistic",
+#                 err.fct = "sse",
+#                 startweights = NULL,
+#                 rep = epochs,
+#                 threshold = 0.2
+#                 )
+# end_time <- Sys.time()
+# end_time - start_time
+
+#saveRDS(nn1.car, "nn1_car.rds")
+nn1.car <- readRDS("nn1_car.rds")
+```
+
+```{r}
+nn1.test_prediction <- list(length = epochs)
+nn1.test_err_curve <- numeric(length = epochs)
+nn1.train_err_curve <- numeric(length = epochs)
+
+for (i in 1:epochs) {
+pr.nn <- predict(nn1.car, scaled_cars_test[,-5], rep = i)
+nn1.test_prediction[[i]] <- pr.nn * (maxs[5] - mins[5]) + mins[5]
+nn1.test_err_curve[i] <- sqrt(mean((cars_dum$price_usd[test_id] - nn1.test_prediction[[i]])^2))
+nn1.train_err_curve[i] <- sqrt(mean(((nn1.car$net.result[[i]] * (maxs[5] - mins[5]) ) + mins[5] - cars_dum[train_id[-valid_id], 7])^2))
+}
+```
+
+### Learning curve
+
+```{r}
+plot(1:epochs, nn1.test_err_curve, col = "blue", main = "Learning Curve (1 hidden layer)", xlab = "epoch", ylab = "sqrt(MSE)", ylim = c(2000,3600), "l")
+lines(1:epochs, nn1.train_err_curve, col = "red")
+legend("right", legend = c("test","train"), lty = c(1,1), col = c("blue", "red"))
+```
+
+```{r}
+nn1.train_err <- nn1.train_err_curve[15]
+nn1.test_err <- nn1.test_err_curve[15]
+```
+
+
+### Дополнительные эксперименты {.tabset .tabset-pills}
+
+#### Число нейронов
+
+Узнаём на validation set и по одной эпохе.
+
+```{r}
+set.seed(44537)
+epochs <- 1
+neur_seq <- rep(c(5,10,20,40), 3)
+# mse_valid_neur <- numeric(length = length(neur_seq))
+# mse_test_neur <- numeric(length = length(neur_seq))
+# 
+# for (i in 1:length(neur_seq)) {
+#     nn1.car_neurons <- neuralnet(n5 ~ .,
+#                     data = scaled_cars_train,
+#                     algorithm = "rprop+",
+#                     hidden = neur_seq[i],
+#                     stepmax = 1e+05,
+#                     linear.output = TRUE,
+#                     act.fct = "logistic",
+#                     err.fct = "sse",
+#                     startweights = NULL,
+#                     rep = epochs,
+#                     threshold = 0.1
+#                     )
+#     pr.nn_neurons <- predict(nn1.car_neurons, scaled_cars_valid[,-5], rep = 1)
+#     nnn.test_prediction <- pr.nn_neurons * (maxs[5] - mins[5]) + mins[5]
+#     nnn.valid_err <- sqrt(mean((cars_dum$price_usd[train_id[valid_id]] - nnn.test_prediction)^2))
+#     nnn.train_err <- sqrt(mean((nn1.car_neurons$net.result[[1]] * (maxs[5] - mins[5]) + mins[5]
+#                                             - cars_dum[train_id[-valid_id], 7])^2))
+#    mse_valid_neur[i] <- nnn.train_err
+#    mse_test_neur[i] <- nnn.valid_err
+#}
+
+#saveRDS(mse_valid_neur, "mse_valid_neur.rds")
+#saveRDS(mse_test_neur, "mse_test_neur.rds")
+mse_valid_neur <- readRDS("mse_valid_neur.rds")
+mse_test_neur <- readRDS("mse_test_neur.rds")
+```
+
+```{r}
+plot(neur_seq, mse_test_neur, col = "red", ylim = c(1000, 5000), main = "Num of neurons parameter tuning", pch = 4, xlab = "neurons", ylab = "sqrt(MSE)")
+points(neur_seq, mse_valid_neur, col = "blue", pch = 4)
+legend("topright", legend = c("train","validation"), lty = c(1,1), col = c("blue", "red"))
+```
+
+## Два скрытых слоя
+
+```{r}
+set.seed(4537)
+
+start_time <- Sys.time()
+
+epochs <- 20
+# nn2.car <- neuralnet(n5 ~ ., 
+#                 data = scaled_cars_train,
+#                 algorithm = "rprop+",
+#                 hidden = c(5, 5), 
+#                 stepmax = 1e+05,
+#                 linear.output = TRUE,
+#                 act.fct = "logistic",
+#                 err.fct = "sse",
+#                 startweights = NULL,
+#                 rep = epochs,
+#                 threshold = 0.2
+#                 )
+# end_time <- Sys.time()
+# end_time - start_time
+
+#saveRDS(nn2.car, "nn2_car.rds")
+nn2.car <- readRDS("nn2_car.rds")
+```
+
+```{r}
+nn2.test_prediction <- list(length = epochs)
+nn2.test_err_curve <- numeric(length = epochs)
+nn2.train_err_curve <- numeric(length = epochs)
+
+for (i in 1:epochs) {
+pr.nn <- predict(nn2.car, scaled_cars_test[,-5], rep = i)
+nn2.test_prediction[[i]] <- pr.nn * (maxs[5] - mins[5]) + mins[5]
+nn2.test_err_curve[i] <- sqrt(mean((cars_dum$price_usd[test_id] - nn2.test_prediction[[i]])^2))
+nn2.train_err_curve[i] <- sqrt(mean(((nn2.car$net.result[[i]] * (maxs[5] - mins[5]) ) + mins[5] - cars_dum[train_id[-valid_id], 7])^2))
+}
+```
+
+### Learning curve
+
+```{r}
+plot(1:epochs, nn2.test_err_curve, col = "blue", main = "Learning Curve (2 hidden layers)", xlab = "epoch", ylab = "sqrt(MSE)", "l", ylim = c(1900, 3200))
+lines(1:epochs, nn2.train_err_curve, col = "red")
+legend("right", legend = c("test","train"), lty = c(1,1), col = c("blue", "red"))
+```
+
+```{r}
+nn2.train_err <- nn2.train_err_curve[9]
+nn2.test_err <- nn2.test_err_curve[9]
+```
+
+### Дополнительные эксперименты {.tabset .tabset-pills}
+
+#### Число нейронов
+
+Узнаём на validation set и по одной эпохе.
+
+```{r}
+set.seed(44537)
+epochs <- 1
+neur_pairs <- list(c(5,5), c(10,10), c(10,5), c(20, 10))
+# mse_valid_neur_pairs <- numeric(length = length(neur_pairs))
+# mse_train_neur_pairs <- numeric(length = length(neur_pairs))
+# 
+# for (i in 1:length(neur_pairs)) {
+#     nn2.car_neurons <- neuralnet(n5 ~ ., 
+#                     data = scaled_cars_train,
+#                     algorithm = "rprop+",
+#                     hidden = neur_pairs[[i]], 
+#                     stepmax = 1e+05,
+#                     linear.output = TRUE,
+#                     act.fct = "logistic",
+#                     err.fct = "sse",
+#                     startweights = NULL,
+#                     rep = epochs,
+#                     threshold = 0.1
+#                     )
+# 
+#     
+#     pr.nn_neurons <- predict(nn2.car_neurons, scaled_cars_valid[,-5], rep = 1)
+#     nnn.test_prediction <- pr.nn_neurons * (maxs[5] - mins[5]) + mins[5]
+#     nnn.valid_err <- sqrt(mean((cars_dum$price_usd[train_id[valid_id]] - nnn.test_prediction)^2))
+#     nnn.train_err <- sqrt(mean((nn2.car_neurons$net.result[[1]] * (maxs[5] - mins[5]) + mins[5] 
+#                                             - cars_dum[train_id[-valid_id], 7])^2))
+#     mse_train_neur_pairs[i] <- nnn.train_err
+#     mse_valid_neur_pairs[i] <- nnn.valid_err
+# }
+
+#saveRDS(mse_train_neur_pairs, "mse_train_neur_pairs.rds")
+#saveRDS(mse_valid_neur_pairs, "mse_valid_neur_pairs.rds")
+mse_train_neur_pairs <- readRDS("mse_train_neur_pairs.rds")
+mse_valid_neur_pairs <- readRDS("mse_valid_neur_pairs.rds")
+```
+
+```{r}
+plot(1:length(neur_pairs), mse_valid_neur_pairs, col = "red", ylim = c(1000, 3400), main = "Num of neurons parameter tuning", pch = 4, xlab = "choice", ylab = "sqrt(MSE)")
+points(1:length(neur_pairs), mse_train_neur_pairs, col = "blue", pch = 4)
+text(1, 1100,  "(5,5)")
+text(2, 1100,  "(10,10)")
+text(3, 1100,  "(10,5)")
+text(3.9, 1100,  "(20,10)")
+legend("topright", legend = c("train","validation"), lty = c(1,1), col = c("blue", "red"))
+```
+
+## Про метод
+
+1. **Какая постановка задачи, что предполагается, что и почему оптимизируется (функция потерь), как оптимизируется?**
+
+Регрессия, квадратичная потеря минимизируется.
+
+2. **Какие параметры у метода: функция плюс соответствие теор.формул и параметров**
+
+Наверх.
+
+3. **Как подбирали параметры, на основе чего?** 
+
+Некоторые на основе общих рекомендаций, некоторые с помощью валидационного подхода
+
+4. **Как справлялись с overfitting?** 
+
+Не совсем правильным способом, но с помощью правдоподобных рассуждений.
+
+5. **Какой получили результат на cross-validation?** 
+
+Узнали, какие варианты числа нейронов получше, а какие похуже.
+
+6. **Подтверждаете свое исходное объяснение, почему метод сработал хорошо/плохо**
+
+Датасет достаточно сложный с точки зрения различных зависимостей, при этом крупный, поэтому предполагаю, что при хорошем выборе параметров можно получить результат, сопоставимый с результатом у случайных деревьев. 
+
+# Сравнительный анализ
+
+**Таблица с корнями из MSE**
+
+```{r}
+table_comp <- cbind(linReg = c(lm.train_err, lm.test_err), linReg_log = c(lm_log.train_err, lm_log.test_err), randomFor = c(rf.train_err, rf.test_err), neuralNet_1 = c(nn1.train_err, nn1.test_err), neuralNet_2 = c(nn2.train_err, nn2.test_err))
+rownames(table_comp) <- c("train", "test")
+table_comp
+```
+
+## Графики предсказаний
+
+```{r}
+par(mfrow = c(2,3))
+plot(cars_dum$price_usd[test_id], exp(lm_log.car_predict), main = "linReg_log (test)", ylim = c(0,50000), xlab = "actual price (USD)", ylab = "prediction (USD)")
+abline(a = 0, b = 1, lty = 2)
+plot(cars_dum$price_usd[test_id], rf.car$test$predicted, main = "RF (test)", ylim = c(0,50000), xlab = "actual price (USD)", ylab = "prediction (USD)")
+abline(a = 0, b = 1, lty = 2)
+plot(cars_dum[test_id,7], nn2.test_prediction[[9]],  main = "NN (test)", ylim = c(0,50000), xlab = "actual price (USD)", ylab = "prediction (USD)")
+abline(a = 0, b = 1, lty = 2)
+plot(cars_dum$price_usd[train_id], exp(lm_log.car$fitted.values), main = "linReg_log (train)", ylim = c(0,50000), xlab = "actual price (USD)", ylab = "prediction (USD)")
+abline(a = 0, b = 1, lty = 2)
+plot(cars_dum$price_usd[train_id[-valid_id]], rf.car$predicted, main = "RF (train)", ylim = c(0,50000), xlab = "actual price (USD)", ylab = "prediction (USD)")
+abline(a = 0, b = 1, lty = 2)
+plot(cars_dum$price_usd[train_id[-valid_id]],  nn2.car$net.result[[9]] * (maxs[5] - mins[5]) + mins[5] , main = "NN (train)", ylim = c(0,50000), xlab = "actual price (USD)", ylab = "prediction (USD)")
+abline(a = 0, b = 1, lty = 2)
+```
+
+
